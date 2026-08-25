@@ -1,0 +1,48 @@
+# Local coordination and pi
+AGENTS.md
+HANDOFF.md
+.pi/
+
+# Python and environments
+**/__pycache__/
+*.py[cod]
+**/*.egg-info/
+**/.pytest_cache/
+**/.mypy_cache/
+**/.ruff_cache/
+**/build/
+**/dist/
+**/.venv/
+
+# Local configs: only templates are versioned
+configs/**/*.yaml
+!configs/**/*.example.yaml
+
+# Generated data, models, and experiment artifacts
+data/
+outputs/
+**/outputs/
+**/checkpoints/
+**/wandb/
+*.bin
+*.ckpt
+*.pt
+*.pth
+*.safetensors
+*.npy
+*.npz
+
+# Native build products
+*.so
+*.o
+*.obj
+*.a
+*.cubin
+*.fatbin
+
+# Local files
+*.log
+.DS_Store
+*.swp
+*~
+\#*\#

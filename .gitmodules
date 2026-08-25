@@ -1,0 +1,9 @@
+[submodule "qtip"]
+	path = third_party/qtip
+	url = https://github.com/Cornell-RelaxML/qtip.git
+[submodule "quip-sharp"]
+	path = third_party/quip-sharp
+	url = https://github.com/Cornell-RelaxML/quip-sharp.git
+[submodule "paroquant"]
+	path = third_party/paroquant
+	url = https://github.com/z-lab/paroquant.git
