@@ -1,4 +1,4 @@
-"""Typed configuration contracts used by the initial package framework."""
+"""Typed configuration contracts for weight-vq commands."""
 
 from __future__ import annotations
 
@@ -7,26 +7,24 @@ from pathlib import Path
 
 
 @dataclass(frozen=True)
-class DatasetConfig:
-    name: str
-    revision: str | None
-    split: str
-
-
-@dataclass(frozen=True)
 class TokenizerConfig:
-    model: Path
+    name: str
+    path: Path
+    revision: str
 
 
 @dataclass(frozen=True)
 class CalibrationConfig:
-    dataset: DatasetConfig
     tokenizer: TokenizerConfig
+    dataset_cache: Path
     output: Path
-    manifest: Path
     seed: int
-    samples: int
+    train_samples: int
+    validation_samples: int
     sequence_length: int
+    force: bool = False
+    expected_train_sha256: str | None = None
+    expected_validation_sha256: str | None = None
 
 
 @dataclass(frozen=True)

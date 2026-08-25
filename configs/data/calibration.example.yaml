@@ -1,12 +1,14 @@
 pipeline:
-  dataset:
-    name: allenai/c4
-    revision: null
-    split: train
   tokenizer:
-    model: /path/to/base-model
+    name: Qwen/Qwen3-4B-Instruct-2507
+    path: /path/to/Qwen3-4B-Instruct-2507
+    revision: cdbee75f17c01a7cc42f958dc650907174af0554
+  dataset_cache: /path/to/huggingface-datasets-cache
   output: outputs/calibration/calibration.pt
-  manifest: outputs/calibration/manifest.json
   seed: 0
-  samples: 2048
+  train_samples: 1920
+  validation_samples: 128
   sequence_length: 2048
+  expected_train_sha256: null
+  expected_validation_sha256: null
+  force: false
