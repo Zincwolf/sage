@@ -13,14 +13,15 @@ HANDOFF.md
 **/build/
 **/dist/
 **/.venv/
+/.uv-cache/
 
 # Local configs: only templates are versioned
 configs/**/*.yaml
 !configs/**/*.example.yaml
 
 # Generated data, models, and experiment artifacts
-data/
-outputs/
+/data/
+/outputs/
 **/outputs/
 **/checkpoints/
 **/wandb/
