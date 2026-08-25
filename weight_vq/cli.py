@@ -55,8 +55,10 @@ def command(args: argparse.Namespace, *, root: Path | None = None) -> list[str]:
 
 def main(argv: Sequence[str] | None = None) -> None:
     args = parser().parse_args(argv)
+    environment = os.environ.copy()
+    environment.pop("VIRTUAL_ENV", None)
     try:
-        completed = subprocess.run(command(args), check=False)
+        completed = subprocess.run(command(args), check=False, env=environment)
     except FileNotFoundError as error:
         raise SystemExit(f"uv executable not found: {command(args)[0]}") from error
     raise SystemExit(completed.returncode)
