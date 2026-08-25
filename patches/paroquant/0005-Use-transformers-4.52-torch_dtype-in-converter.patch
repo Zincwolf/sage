@@ -1,0 +1,25 @@
+From 2a8da75ac6e6d400305f0be43e3633b09e8161ea Mon Sep 17 00:00:00 2001
+From: Zincwolf <zincwolf@outlook.com>
+Date: Fri, 21 Aug 2026 18:18:39 +0800
+Subject: [PATCH 5/5] Use transformers 4.52 torch_dtype in converter
+
+---
+ paroquant/cli/convert.py | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/paroquant/cli/convert.py b/paroquant/cli/convert.py
+index 3d897e6..ddc0439 100644
+--- a/paroquant/cli/convert.py
++++ b/paroquant/cli/convert.py
+@@ -107,7 +107,7 @@ def _write_config_json(
+ 
+ def _load_model(model_id: str, device_map: str = "cpu") -> torch.nn.Module:
+     kwargs = dict(
+-        dtype="auto",
++        torch_dtype="auto",
+         device_map=device_map,
+         low_cpu_mem_usage=True,
+         trust_remote_code=True,
+-- 
+2.34.1
+

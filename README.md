@@ -21,6 +21,17 @@
 
 `wvq` 只执行目标环境中的 worker，并固定使用 `uv run --no-sync`；它不会创建、更新或修复环境。
 
+## 第三方补丁
+
+第三方仓库保持在 `.gitmodules` 和 [THIRD_PARTY.md](THIRD_PARTY.md) 记录的上游 revision；本地适配以 `patches/<upstream>/` 下的完整 `git format-patch` 系列维护，不更新父仓库中的 submodule gitlink。首次检出后，按文件名顺序应用所需补丁。例如 SPHQuant：
+
+```bash
+git submodule update --init third_party/paroquant
+(cd third_party/paroquant && git am ../../patches/paroquant/*.patch)
+```
+
+应用后，父仓库中 `third_party/paroquant` 显示 modified 是正常现象，不要执行 `git add third_party/paroquant`。补丁的维护、重建和校验规范见 [THIRD_PARTY.md](THIRD_PARTY.md)。
+
 ## 准备环境
 
 要求 uv 0.12.x 和 Python 3.11。先安装根环境，再按机器选择 data 的 CUDA profile，比如在 CUDA 12.4 环境下：

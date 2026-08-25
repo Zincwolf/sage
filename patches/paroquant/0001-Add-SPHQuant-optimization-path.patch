@@ -1,0 +1,1946 @@
+From eb111a6b53743fad64cd7bc72a4252d347a90ca7 Mon Sep 17 00:00:00 2001
+From: Zincwolf <zincwolf@outlook.com>
+Date: Fri, 21 Aug 2026 17:17:36 +0800
+Subject: [PATCH 1/5] Add SPHQuant optimization path
+
+---
+ experiments/sphquant/export_qwen3_4b.sh |  43 +++
+ experiments/sphquant/qwen3_4b.sh        | 115 ++++++++
+ experiments/sphquant/qwen3_5_9b.sh      | 108 ++++++++
+ paroquant/cli/convert.py                | 111 +++++++-
+ paroquant/cli/optimize.py               | 287 +++++++++++++++-----
+ paroquant/optim/multimodal.py           | 109 ++++++++
+ paroquant/optim/sphlinear.py            | 332 ++++++++++++++++++++++++
+ paroquant/optim/train.py                |  51 ++--
+ paroquant/optim/util.py                 |  97 +++++--
+ tests/test_sph_launcher.py              |  71 +++++
+ tests/test_sph_qwen3.py                 |  54 ++++
+ tests/test_sphconvert.py                |  47 ++++
+ tests/test_sphlinear.py                 |  76 ++++++
+ 13 files changed, 1388 insertions(+), 113 deletions(-)
+ create mode 100755 experiments/sphquant/export_qwen3_4b.sh
+ create mode 100755 experiments/sphquant/qwen3_4b.sh
+ create mode 100755 experiments/sphquant/qwen3_5_9b.sh
+ create mode 100644 paroquant/optim/multimodal.py
+ create mode 100644 paroquant/optim/sphlinear.py
+ create mode 100644 tests/test_sph_launcher.py
+ create mode 100644 tests/test_sph_qwen3.py
+ create mode 100644 tests/test_sphconvert.py
+ create mode 100644 tests/test_sphlinear.py
+
+diff --git a/experiments/sphquant/export_qwen3_4b.sh b/experiments/sphquant/export_qwen3_4b.sh
+new file mode 100755
+index 0000000..490862b
+--- /dev/null
++++ b/experiments/sphquant/export_qwen3_4b.sh
+@@ -0,0 +1,43 @@
++#!/usr/bin/env bash
++
++set -euo pipefail
++
++SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
++PAROQUANT_ROOT="$(cd -- "${SCRIPT_DIR}/../.." && pwd)"
++WEIGHT_VQ_ROOT="$(cd -- "${PAROQUANT_ROOT}/.." && pwd)"
++WORK="${WORK:-$(cd -- "${WEIGHT_VQ_ROOT}/../.." && pwd)}"
++MODEL="${MODEL:-${WORK}/pretrained/Qwen3-4B-Instruct-2507}"
++MODE="${MODE:-layerwise}" # init | layerwise
++OUTPUT_ROOT="${OUTPUT_ROOT:-${WORK}/checkpoint/weight-vq/Qwen3-4B-Instruct-2507/sphquant}"
++DRY_RUN="${DRY_RUN:-0}"
++
++case "$MODE" in
++  init)
++    RESULT_ROOT="${RESULT_ROOT:-${OUTPUT_ROOT}/no_tuning}"
++    HF_OUTPUT="${HF_OUTPUT:-${OUTPUT_ROOT}/hf_no_tuning}"
++    ;;
++  layerwise)
++    RESULT_ROOT="${RESULT_ROOT:-${OUTPUT_ROOT}/layerwise}"
++    HF_OUTPUT="${HF_OUTPUT:-${OUTPUT_ROOT}/hf_layerwise}"
++    ;;
++  *)
++    echo "ERROR: MODE must be init or layerwise" >&2
++    exit 2
++    ;;
++esac
++RESULT_DIR="${RESULT_ROOT}/$(basename "$MODEL")"
++
++COMMAND=(
++  python -m paroquant.cli.convert
++  --model "$MODEL"
++  --result-dir "$RESULT_DIR"
++  --output-path "$HF_OUTPUT"
++  --mode pseudo
++)
++printf 'COMMAND:'
++printf ' %q' "${COMMAND[@]}"
++printf '\n'
++if [[ "$DRY_RUN" == "1" ]]; then
++  exit 0
++fi
++exec "${COMMAND[@]}"
+diff --git a/experiments/sphquant/qwen3_4b.sh b/experiments/sphquant/qwen3_4b.sh
+new file mode 100755
+index 0000000..67e8cc8
+--- /dev/null
++++ b/experiments/sphquant/qwen3_4b.sh
+@@ -0,0 +1,115 @@
++#!/usr/bin/env bash
++
++set -euo pipefail
++
++SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
++PAROQUANT_ROOT="$(cd -- "${SCRIPT_DIR}/../.." && pwd)"
++WEIGHT_VQ_ROOT="$(cd -- "${PAROQUANT_ROOT}/.." && pwd)"
++WORK="${WORK:-$(cd -- "${WEIGHT_VQ_ROOT}/../.." && pwd)}"
++MODEL="${MODEL:-${WORK}/pretrained/Qwen3-4B-Instruct-2507}"
++CALIBRATION="${CALIBRATION:-${WEIGHT_VQ_ROOT}/benchmark/qwen3-4b/data/calibration.pt}"
++MODE="${MODE:-layerwise}" # init | layerwise
++CACHE_SHARDS="${CACHE_SHARDS:-}"
++OUTPUT_ROOT="${OUTPUT_ROOT:-${WORK}/checkpoint/weight-vq/Qwen3-4B-Instruct-2507/sphquant}"
++USE_WANDB="${USE_WANDB:-0}"
++DRY_RUN="${DRY_RUN:-0}"
++SMOKE="${SMOKE:-0}"
++BOUNDED="${BOUNDED:-0}"
++SPH_SAMPLE_SIZE="${SPH_SAMPLE_SIZE:-65536}"
++SPH_KMEANS_ITERATIONS="${SPH_KMEANS_ITERATIONS:-20}"
++EXTRA_ARGS=()
++if [[ "$SMOKE" == "1" ]]; then
++  SPH_SAMPLE_SIZE=512
++  SPH_KMEANS_ITERATIONS=2
++  EXTRA_ARGS=(--max-layers 1 --calibration-limit 32)
++fi
++
++case "$MODE" in
++  init)
++    EPOCHS="${EPOCHS_OVERRIDE:-0}"
++    OUTPUT_DIR="${OUTPUT_DIR:-${OUTPUT_ROOT}/no_tuning}"
++    ;;
++  layerwise)
++    EPOCHS="${EPOCHS_OVERRIDE:-20}"
++    OUTPUT_DIR="${OUTPUT_DIR:-${OUTPUT_ROOT}/layerwise}"
++    ;;
++  *)
++    echo "ERROR: MODE must be init or layerwise" >&2
++    exit 2
++    ;;
++esac
++if [[ "$SMOKE" == "1" && "$MODE" == "layerwise" ]]; then
++  # 80 samples / batch 16 * 20 epochs = exactly 100 optimizer steps.
++  EXTRA_ARGS=(--max-layers 1 --calibration-limit 80)
++fi
++if [[ "$BOUNDED" == "1" ]]; then
++  SPH_SAMPLE_SIZE="${SPH_SAMPLE_SIZE_OVERRIDE:-512}"
++  SPH_KMEANS_ITERATIONS="${SPH_KMEANS_ITERATIONS_OVERRIDE:-2}"
++  EXTRA_ARGS=(--calibration-limit "${CALIBRATION_LIMIT:-16}")
++fi
++if [[ -z "$CACHE_SHARDS" ]]; then
++  CACHE_SHARDS=8
++  if [[ "$SMOKE" == "1" ]]; then
++    CACHE_SHARDS=2
++    if [[ "$MODE" == "layerwise" ]]; then
++      CACHE_SHARDS=5
++    fi
++  fi
++  if [[ "$BOUNDED" == "1" ]]; then
++    CACHE_SHARDS=1
++  fi
++fi
++
++[[ -f "${MODEL}/config.json" ]] || {
++  echo "ERROR: model not found: $MODEL" >&2
++  exit 1
++}
++[[ -f "$CALIBRATION" || "$DRY_RUN" == "1" ]] || {
++  echo "ERROR: calibration artifact not found: $CALIBRATION" >&2
++  exit 1
++}
++
++COMMAND=(
++  python -m paroquant.cli.optimize
++  --method sphquant
++  --model "$MODEL"
++  --params "radius:0.001,codebook:0.001"
++  --epochs "$EPOCHS"
++  --weight-decay 0
++  --betas 0.9 0.999
++  --eps 1e-8
++  --loss mse
++  --optimizer adam
++  --use-lr-scheduler false
++  --group-size 128
++  --n-bit 2
++  --num-rotations 0
++  --datasets wikitext2 c4 redpajama
++  --val-dataset pileval
++  --train-size 1920
++  --validation-size 128
++  --batch-size 16
++  --val-batch-size 16
++  --gradient-accumulation-steps 1
++  --seqlen 2048
++  --calibration-path "$CALIBRATION"
++  --sph-sample-size "$SPH_SAMPLE_SIZE"
++  --sph-kmeans-iterations "$SPH_KMEANS_ITERATIONS"
++  --cache-shards "$CACHE_SHARDS"
++  --output-dir "$OUTPUT_DIR"
++  --resume true
++  --checkpointing true
++  --seed 0
++  "${EXTRA_ARGS[@]}"
++)
++if [[ "$USE_WANDB" == "1" ]]; then
++  COMMAND+=(--use-wandb true)
++fi
++
++printf 'COMMAND:'
++printf ' %q' "${COMMAND[@]}"
++printf '\n'
++if [[ "$DRY_RUN" == "1" ]]; then
++  exit 0
++fi
++exec "${COMMAND[@]}"
+diff --git a/experiments/sphquant/qwen3_5_9b.sh b/experiments/sphquant/qwen3_5_9b.sh
+new file mode 100755
+index 0000000..6feabb1
+--- /dev/null
++++ b/experiments/sphquant/qwen3_5_9b.sh
+@@ -0,0 +1,108 @@
++#!/usr/bin/env bash
++
++set -euo pipefail
++
++SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
++WEIGHT_VQ_ROOT="${WEIGHT_VQ_ROOT:-$(cd -- "${SCRIPT_DIR}/../../.." && pwd)}"
++WORK="${WORK:-$(cd -- "${WEIGHT_VQ_ROOT}/../.." && pwd)}"
++MODEL="${MODEL:-${WORK}/pretrained/Qwen3.5-9B}"
++CALIBRATION="${CALIBRATION:-${WEIGHT_VQ_ROOT}/benchmark/qwen3.5-9b/data/coco_calibration_manifest.json}"
++MODE="${MODE:-layerwise}" # init | layerwise
++OUTPUT_ROOT="${OUTPUT_ROOT:-${WORK}/pretrained/weight-vq-qwen3.5-9b/sphquant}"
++OUTPUT_DIR="${OUTPUT_DIR:-}"
++CACHE_SHARDS="${CACHE_SHARDS:-}"
++USE_WANDB="${USE_WANDB:-0}"
++DRY_RUN="${DRY_RUN:-0}"
++SMOKE="${SMOKE:-0}"
++
++TRAIN_BATCH_SIZE=16
++VAL_BATCH_SIZE=16
++SPH_SAMPLE_SIZE=65536
++SPH_KMEANS_ITERATIONS=20
++EXTRA_ARGS=()
++if [[ "$SMOKE" == "1" ]]; then
++  TRAIN_BATCH_SIZE=4
++  VAL_BATCH_SIZE=4
++  SPH_SAMPLE_SIZE=512
++  SPH_KMEANS_ITERATIONS=2
++  EXTRA_ARGS=(--max-layers 1 --calibration-limit 32)
++fi
++
++case "$MODE" in
++  init)
++    EPOCHS=0
++    OUTPUT_DIR="${OUTPUT_DIR:-${OUTPUT_ROOT}/no_tuning}"
++    ;;
++  layerwise)
++    EPOCHS=20
++    OUTPUT_DIR="${OUTPUT_DIR:-${OUTPUT_ROOT}/layerwise}"
++    ;;
++  *)
++    echo "ERROR: MODE must be init or layerwise" >&2
++    exit 2
++    ;;
++esac
++if [[ "$SMOKE" == "1" && "$MODE" == "layerwise" ]]; then
++  EXTRA_ARGS=(--max-layers 1 --calibration-limit 80)
++fi
++if [[ -z "$CACHE_SHARDS" ]]; then
++  CACHE_SHARDS=8
++  if [[ "$SMOKE" == "1" && "$MODE" == "layerwise" ]]; then
++    CACHE_SHARDS=5
++  fi
++fi
++
++[[ -f "${MODEL}/config.json" ]] || {
++  echo "ERROR: model not found: $MODEL" >&2
++  exit 1
++}
++[[ -f "$CALIBRATION" || "$DRY_RUN" == "1" ]] || {
++  echo "ERROR: COCO calibration manifest not found: $CALIBRATION" >&2
++  exit 1
++}
++
++COMMAND=(
++  python -m paroquant.cli.optimize
++  --method sphquant
++  --model "$MODEL"
++  --params "radius:0.001,codebook:0.001"
++  --epochs "$EPOCHS"
++  --weight-decay 0
++  --betas 0.9 0.999
++  --eps 1e-8
++  --loss mse
++  --optimizer adam
++  --use-lr-scheduler false
++  --group-size 128
++  --n-bit 2
++  --num-rotations 0
++  --datasets coco
++  --val-dataset coco
++  --train-size 1920
++  --validation-size 128
++  --batch-size "$TRAIN_BATCH_SIZE"
++  --val-batch-size "$VAL_BATCH_SIZE"
++  --gradient-accumulation-steps 1
++  --seqlen 2048
++  --multimodal-calibration-path "$CALIBRATION"
++  --sph-sample-size "$SPH_SAMPLE_SIZE"
++  --sph-kmeans-iterations "$SPH_KMEANS_ITERATIONS"
++  --model-dtype bfloat16
++  --cache-shards "$CACHE_SHARDS"
++  --output-dir "$OUTPUT_DIR"
++  --resume true
++  --checkpointing true
++  --seed 0
++  "${EXTRA_ARGS[@]}"
++)
++if [[ "$USE_WANDB" == "1" ]]; then
++  COMMAND+=(--use-wandb true)
++fi
++
++printf 'COMMAND:'
++printf ' %q' "${COMMAND[@]}"
++printf '\n'
++if [[ "$DRY_RUN" == "1" ]]; then
++  exit 0
++fi
++exec "${COMMAND[@]}"
+diff --git a/paroquant/cli/convert.py b/paroquant/cli/convert.py
+index 8055cec..3d897e6 100644
+--- a/paroquant/cli/convert.py
++++ b/paroquant/cli/convert.py
+@@ -3,16 +3,16 @@ from __future__ import annotations
+ from collections import defaultdict
+ import json
+ import shutil
+-from contextlib import suppress
++from contextlib import ExitStack, suppress
+ from argparse import ArgumentParser
+ from pathlib import Path
+ from typing import Any
+ 
+ import torch
++from safetensors import safe_open
+ from tqdm import tqdm
+ from transformers import AutoModelForCausalLM, AutoModelForImageTextToText
+ 
+-from paroquant.optim.qexperts import PseudoQuantizedMoEExperts, get_named_moe_experts, is_fused_moe_experts
+ from paroquant.optim.util import get_named_linears, set_module_by_name
+ 
+ 
+@@ -106,13 +106,48 @@ def _write_config_json(
+ 
+ 
+ def _load_model(model_id: str, device_map: str = "cpu") -> torch.nn.Module:
+-    kwargs = dict(torch_dtype=torch.float16, device_map=device_map, low_cpu_mem_usage=True, trust_remote_code=True)
++    kwargs = dict(
++        dtype="auto",
++        device_map=device_map,
++        low_cpu_mem_usage=True,
++        trust_remote_code=True,
++    )
+     try:
+         return AutoModelForImageTextToText.from_pretrained(model_id, **kwargs)
+     except (ValueError, KeyError):
+         return AutoModelForCausalLM.from_pretrained(model_id, **kwargs)
+ 
+ 
++def _append_missing_source_weights(
++    state_dict: dict[str, torch.Tensor],
++    source_dir: Path,
++    preserve_keys: set[str],
++) -> dict[str, torch.Tensor]:
++    index_path = source_dir / "model.safetensors.index.json"
++    if not index_path.is_file():
++        return state_dict
++    weight_map = json.loads(index_path.read_text())["weight_map"]
++    updated = {
++        name: tensor
++        for name, tensor in state_dict.items()
++        if name not in weight_map or name in preserve_keys
++    }
++    with ExitStack() as stack:
++        handles = {}
++        for name in sorted(set(weight_map) - preserve_keys):
++            filename = weight_map[name]
++            if filename not in handles:
++                handles[filename] = stack.enter_context(
++                    safe_open(
++                        source_dir / filename,
++                        framework="pt",
++                        device="cpu",
++                    )
++                )
++            updated[name] = handles[filename].get_tensor(name)
++    return updated
++
++
+ def _get_blocks(model: torch.nn.Module):
+     for path in _LAYER_PATHS:
+         node = model
+@@ -204,16 +239,33 @@ def _to_awq_buffers(
+ 
+ 
+ @torch.no_grad()
+-def _convert_pseudo(model: torch.nn.Module, result_dir: Path) -> int:
+-    from paroquant.optim.qlinear import PseudoQuantizedLinear
+-
++def _convert_pseudo(
++    model: torch.nn.Module,
++    result_dir: Path,
++) -> tuple[int, set[str]]:
++    from paroquant.optim.sphlinear import SPHPseudoQuantizedLinear
++
++    first_checkpoint = next(iter(sorted(result_dir.glob("*.pt"))), None)
++    sph_mode = False
++    if first_checkpoint is not None:
++        first_state = torch.load(
++            first_checkpoint,
++            map_location="cpu",
++            weights_only=False,
++        )
++        sph_mode = "sphquant_version" in first_state
+     blocks = _get_blocks(model)
++    model_state_keys = set(model.state_dict())
++    modified_keys: set[str] = set()
+     count = 0
+     for layer_idx, layer in enumerate(tqdm(blocks, desc="Pseudo-quantizing")):
+         layer = layer.cuda()
+         modules: dict[str, torch.nn.Module] = {}
+         modules.update(get_named_linears(layer))
+-        modules.update(get_named_moe_experts(layer))
++        if not sph_mode:
++            from paroquant.optim.qexperts import get_named_moe_experts
++
++            modules.update(get_named_moe_experts(layer))
+ 
+         for name, module in modules.items():
+             pt_file = result_dir / f"{layer_idx}.{name}.pt"
+@@ -221,23 +273,50 @@ def _convert_pseudo(model: torch.nn.Module, result_dir: Path) -> int:
+                 continue
+             sd = torch.load(pt_file, weights_only=False, map_location="cuda")
+             if isinstance(module, torch.nn.Linear):
+-                qlinear = PseudoQuantizedLinear.from_state_dict(sd)
++                if "sphquant_version" in sd:
++                    qlinear = SPHPseudoQuantizedLinear.from_state_dict(sd)
++                else:
++                    from paroquant.optim.qlinear import PseudoQuantizedLinear
++
++                    qlinear = PseudoQuantizedLinear.from_state_dict(sd)
+                 module.weight.data.copy_(qlinear.pseudo_weight())
+                 if module.bias is not None and qlinear.bias is not None:
+                     module.bias.data.copy_(qlinear.bias.data)
+-            elif is_fused_moe_experts(module):
++                suffix = f"layers.{layer_idx}.{name}.weight"
++                matches = [
++                    key for key in model_state_keys if key.endswith(suffix)
++                ]
++                if len(matches) != 1:
++                    raise KeyError(
++                        f"Could not resolve state key for layer={layer_idx} "
++                        f"module={name}: {matches}"
++                    )
++                modified_keys.add(matches[0])
++            else:
++                from paroquant.optim.qexperts import (
++                    PseudoQuantizedMoEExperts,
++                    is_fused_moe_experts,
++                )
++
++                if not is_fused_moe_experts(module):
++                    raise NotImplementedError(
++                        f"Unsupported module type: {type(module)}"
++                    )
+                 qexperts = PseudoQuantizedMoEExperts.from_state_dict(sd, module, "cuda")
+                 module.gate_up_proj.data.copy_(qexperts.gate_up_proj.data)
+                 module.down_proj.data.copy_(qexperts.down_proj.data)
+-            else:
+-                raise NotImplementedError(f"Unsupported module type: {type(module)}")
+             count += 1
+         layer.cpu()
+-    return count
++    return count, modified_keys
+ 
+ 
+ @torch.no_grad()
+ def _quantize_layer(state_dict: dict, device: str) -> tuple[dict[str, torch.Tensor], int, int, int]:
++    if "sphquant_version" in state_dict:
++        raise ValueError(
++            "SPHQuant reproduction only supports --mode pseudo; packed "
++            "deployment is intentionally out of scope"
++        )
+     weight = state_dict["weight"].to(device=device, dtype=torch.float32)
+ 
+     bits = int(_get_value(state_dict, "n_bits", "quantizer.n_bits"))
+@@ -411,6 +490,7 @@ def _convert_real(
+     result_dir: Path,
+ ) -> tuple[int, dict[str, Any] | None, dict[str, torch.Tensor]]:
+     from paroquant.inference.backends.transformers.modules import RotateQuantizedLinear
++    from paroquant.optim.qexperts import get_named_moe_experts
+ 
+     blocks = _get_blocks(model)
+     count = 0
+@@ -486,7 +566,12 @@ def main() -> None:
+     quant_config: dict[str, Any] | None = None
+     save_state_dict: dict[str, torch.Tensor] | None = None
+     if args.mode == "pseudo":
+-        count = _convert_pseudo(model, result_dir)
++        count, modified_keys = _convert_pseudo(model, result_dir)
++        save_state_dict = _append_missing_source_weights(
++            model.state_dict(),
++            source_dir,
++            modified_keys,
++        )
+     else:
+         count, quant_config, save_state_dict = _convert_real(model, result_dir)
+         model.config.quantization_config = quant_config
+diff --git a/paroquant/cli/optimize.py b/paroquant/cli/optimize.py
+index 9469078..6c27782 100644
+--- a/paroquant/cli/optimize.py
++++ b/paroquant/cli/optimize.py
+@@ -12,9 +12,9 @@ import torch.nn as nn
+ import wandb
+ from tqdm import tqdm
+ 
+-from paroquant.optim.train import optimize_module, get_random_rotation_pairs
+-from paroquant.optim.qlinear import PseudoQuantizedLinear
+-from paroquant.optim.qexperts import PseudoQuantizedMoEExperts, get_named_moe_experts, is_fused_moe_experts
++from paroquant.optim.train import optimize_module
++from paroquant.optim.multimodal import CocoCalibrationBatches
++from paroquant.optim.sphlinear import SPHPseudoQuantizedLinear
+ from paroquant.optim.util import (
+     set_module_by_name,
+     load_model,
+@@ -31,7 +31,6 @@ from paroquant.optim.util import (
+     RETAINED_KWARG_KEYS,
+     to_device,
+ )
+-from paroquant.optim.rotation import transform_to_kernel_data
+ 
+ 
+ @dataclass(kw_only=True)
+@@ -44,12 +43,15 @@ class Config:
+     # The number of epochs for each stage of optimization,
+     # e.g., --epochs 10 10
+     epochs: list[int]
++    method: Literal["paroquant", "sphquant"] = "paroquant"
+ 
+     weight_decay: float = 0.01
+     betas: tuple[float, float] = (0.9, 0.95)
+     eps: float = 1e-10
+     # Loss function to use.
+     loss: Literal["mse", "smooth_l1"] = "smooth_l1"
++    optimizer: Literal["adam", "adamw"] = "adamw"
++    use_lr_scheduler: bool = True
+ 
+     # Quantization & rotation group size.
+     group_size: int
+@@ -72,6 +74,13 @@ class Config:
+     # Increasing this reduces peak memory usage but increases training time.
+     gradient_accumulation_steps: int = 1
+     seqlen: int
++    calibration_path: str | None = None
++    multimodal_calibration_path: str | None = None
++    calibration_limit: int | None = None
++    max_layers: int | None = None
++    sph_sample_size: int = 65536
++    sph_kmeans_iterations: int = 20
++    model_dtype: Literal["float16", "bfloat16"] = "float16"
+ 
+     # Number of shards to cache the input/output tensors. At any time, only one shard
+     # will be moved to GPU for optimization. The rest will be kept in CPU memory.
+@@ -105,6 +114,26 @@ def setup_wandb(args: Config) -> wandb.Run | None:
+ def main():
+     args = simple_parsing.parse(Config, add_option_string_dash_variants=simple_parsing.DashVariant.DASH)
+     print(args)
++    if args.method == "sphquant":
++        if args.group_size != 128 or args.n_bit != 2:
++            raise ValueError(
++                "SPHQuant W2 reproduction requires group_size=128 and n_bit=2"
++            )
++        if args.params != ["radius:0.001,codebook:0.001"]:
++            raise ValueError(
++                "SPHQuant reproduction requires one joint parameter stage: "
++                "radius:0.001,codebook:0.001"
++            )
++        if args.epochs not in ([0], [20]) or args.loss != "mse":
++            raise ValueError(
++                "SPHQuant reproduction requires MSE and either zero "
++                "(No-Tuning) or 20 joint epochs"
++            )
++        if args.optimizer != "adam" or args.use_lr_scheduler:
++            raise ValueError(
++                "SPHQuant reproduction requires Adam without ParoQuant's "
++                "cosine scheduler"
++            )
+ 
+     # Store the results in a subdirectory.
+     model_name = args.model.split("/")[-1]
+@@ -132,32 +161,107 @@ def main():
+     with open(output_dir / "args.json", "w") as f:
+         json.dump(vars(args), f, indent=2)
+ 
++    if args.calibration_path and args.multimodal_calibration_path:
++        raise ValueError(
++            "calibration_path and multimodal_calibration_path are mutually exclusive"
++        )
++    model_dtype = getattr(torch, args.model_dtype)
++
+     # Load model.
+-    model = load_model(args.model, device_map="cpu", dtype=torch.float16).half()
++    model = load_model(
++        args.model,
++        device_map="cpu",
++        dtype=model_dtype,
++        trust_remote_code=True,
++    ).to(dtype=model_dtype)
+     move_embed(model, device)
+-    tokenizer = load_tokenizer(args.model)
+     blocks = get_blocks(model)
+ 
+-    # Get calibration dataset.
+-    samples = get_mixed_calib_dataset(
+-        args.datasets,
+-        tokenizer=tokenizer,
+-        n_samples=args.train_size,
+-        block_size=args.seqlen,
+-        seed=args.seed,
+-        split="train",
+-    )
+-    samples = torch.stack(samples, dim=0).to(device)
+-
+-    val_samples = get_calib_dataset(
+-        args.val_dataset,
+-        tokenizer=tokenizer,
+-        n_samples=args.validation_size,
+-        block_size=args.seqlen,
+-        seed=args.seed,
+-        split="validation",
+-    )
+-    val_samples = torch.stack(val_samples, dim=0).to(device)
++    # Get calibration dataset. A pre-tokenized artifact makes all comparison
++    # methods consume byte-identical token sequences.
++    if args.multimodal_calibration_path is not None:
++        samples = CocoCalibrationBatches(
++            args.multimodal_calibration_path,
++            model_path=args.model,
++            split="train",
++            batch_size=args.batch_size,
++            limit=args.calibration_limit,
++        )
++        val_batch_size = args.val_batch_size or args.batch_size
++        val_limit = (
++            min(args.calibration_limit, args.validation_size)
++            if args.calibration_limit is not None
++            else None
++        )
++        val_samples = CocoCalibrationBatches(
++            args.multimodal_calibration_path,
++            model_path=args.model,
++            split="validation",
++            batch_size=val_batch_size,
++            limit=val_limit,
++        )
++        if args.calibration_limit is None:
++            if len(samples.records) != args.train_size:
++                raise ValueError(
++                    f"Multimodal train sample count {len(samples.records)} != "
++                    f"{args.train_size}"
++                )
++            if len(val_samples.records) != args.validation_size:
++                raise ValueError(
++                    f"Multimodal validation sample count "
++                    f"{len(val_samples.records)} != {args.validation_size}"
++                )
++    elif args.calibration_path is not None:
++        calibration = torch.load(
++            args.calibration_path,
++            map_location="cpu",
++            weights_only=False,
++        )
++        samples = calibration["train"]
++        val_samples = calibration["validation"]
++        expected_train = (args.train_size, args.seqlen)
++        expected_val = (args.validation_size, args.seqlen)
++        if tuple(samples.shape) != expected_train:
++            raise ValueError(
++                f"Calibration train shape {tuple(samples.shape)} != "
++                f"{expected_train}"
++            )
++        if tuple(val_samples.shape) != expected_val:
++            raise ValueError(
++                f"Calibration validation shape {tuple(val_samples.shape)} != "
++                f"{expected_val}"
++            )
++        samples = samples.to(device)
++        val_samples = val_samples.to(device)
++        if args.calibration_limit is not None:
++            if args.calibration_limit <= 0:
++                raise ValueError("calibration_limit must be positive")
++            samples = samples[: args.calibration_limit]
++            val_samples = val_samples[: min(
++                args.calibration_limit,
++                val_samples.shape[0],
++            )]
++    else:
++        tokenizer = load_tokenizer(args.model)
++        samples = get_mixed_calib_dataset(
++            args.datasets,
++            tokenizer=tokenizer,
++            n_samples=args.train_size,
++            block_size=args.seqlen,
++            seed=args.seed,
++            split="train",
++        )
++        samples = torch.stack(samples, dim=0).to(device)
++
++        val_samples = get_calib_dataset(
++            args.val_dataset,
++            tokenizer=tokenizer,
++            n_samples=args.validation_size,
++            block_size=args.seqlen,
++            seed=args.seed,
++            split="validation",
++        )
++        val_samples = torch.stack(val_samples, dim=0).to(device)
+ 
+     # Capture per-batch positional args and layer kwargs.
+     logger.info("Capturing layer positional args and kwargs...")
+@@ -172,6 +276,7 @@ def main():
+         blocks,
+         samples,
+         batch_size=args.batch_size,
++        device=device,
+     )
+ 
+     val_batch_size = args.val_batch_size or args.batch_size
+@@ -185,6 +290,7 @@ def main():
+         blocks,
+         val_samples,
+         batch_size=val_batch_size,
++        device=device,
+     )
+     new_retained_kwargs_batches = deepcopy(og_retained_kwargs_batches)
+     new_val_retained_kwargs_batches = deepcopy(og_val_retained_kwargs_batches)
+@@ -199,7 +305,7 @@ def main():
+         layer: nn.Module,
+         args_batched: list[tuple[torch.Tensor, ...]],
+         *,
+-        kwargs: dict,
++        kwargs: list[dict],
+         retained_kwargs_batches: list[dict],
+         store_device: torch.device | str,
+     ) -> list[torch.Tensor]:
+@@ -207,7 +313,7 @@ def main():
+ 
+         layer.to(device)
+         for batch_idx, args_batch in enumerate(args_batched):
+-            batch_kwargs = kwargs.copy()
++            batch_kwargs = to_device(kwargs[batch_idx], device)
+             for key in RETAINED_KWARG_KEYS:
+                 if key in retained_kwargs_batches[batch_idx]:
+                     batch_kwargs[key] = to_device(retained_kwargs_batches[batch_idx][key], device)
+@@ -240,6 +346,9 @@ def main():
+         group_size: int,
+         num_rotations: int,
+     ) -> list[torch.Tensor]:
++        from paroquant.optim.rotation import transform_to_kernel_data
++        from paroquant.optim.train import get_random_rotation_pairs
++
+         weight_grouped = weight.view(weight.shape[0], -1, group_size).permute(1, 0, 2)
+         all_pairs = get_random_rotation_pairs(
+             weight_grouped,
+@@ -264,6 +373,8 @@ def main():
+ 
+     # Layerwise, multi-stage optimization.
+     for layer_idx, layer in enumerate(tqdm(blocks)):
++        if args.max_layers is not None and layer_idx >= args.max_layers:
++            break
+         empty_cache()
+         logger.info(f"Capturing original layer output...")
+         # Original output of this layer.
+@@ -317,7 +428,12 @@ def main():
+             param.requires_grad = False
+ 
+         linear_modules = get_named_linears(layer)
+-        expert_modules = get_named_moe_experts(layer)
++        if args.method == "sphquant":
++            expert_modules = {}
++        else:
++            from paroquant.optim.qexperts import get_named_moe_experts
++
++            expert_modules = get_named_moe_experts(layer)
+         optim_modules: dict[str, nn.Module] = {}
+         optim_modules.update(linear_modules)
+         optim_modules.update(expert_modules)
+@@ -333,7 +449,7 @@ def main():
+             all_files_exist = False
+ 
+         if not all_files_exist:
+-            logger.info(f"Initializing rotation parameters...")
++            logger.info(f"Initializing {args.method} parameters...")
+ 
+         linear_names_to_optimize = [name for name in linear_modules.keys() if name not in args.skipped_modules]
+         expert_names_to_optimize = [name for name in expert_modules.keys() if name not in args.skipped_modules]
+@@ -353,37 +469,73 @@ def main():
+                 existing_result_file = output_dir / f"{layer_idx}.{name}.pt"
+                 sd = torch.load(existing_result_file, map_location=device)
+                 if isinstance(old_module, nn.Linear):
+-                    new_module = PseudoQuantizedLinear.from_state_dict(sd)
++                    if args.method == "sphquant":
++                        new_module = SPHPseudoQuantizedLinear.from_state_dict(sd)
++                    else:
++                        from paroquant.optim.qlinear import PseudoQuantizedLinear
++
++                        new_module = PseudoQuantizedLinear.from_state_dict(sd)
+                     set_module_by_name(layer, name, new_module)
+-                elif is_fused_moe_experts(old_module):
++                else:
++                    from paroquant.optim.qexperts import (
++                        PseudoQuantizedMoEExperts,
++                        is_fused_moe_experts,
++                    )
++
++                    if not is_fused_moe_experts(old_module):
++                        raise NotImplementedError(
++                            f"Unsupported module type: {type(old_module)}"
++                        )
+                     new_module = PseudoQuantizedMoEExperts.from_state_dict(sd, old_module, device)
+                     set_module_by_name(layer, name, new_module)
+-                else:
+-                    raise NotImplementedError(f"Unsupported module type: {type(old_module)}")
+                 named_pseudo_modules[name] = new_module
+                 continue
+ 
+             old_module.to(device)
+             if isinstance(old_module, nn.Linear):
+-                weight = old_module.weight.float()
+-                rotation_pairs = init_rotation_data(
+-                    weight,
+-                    seed=args.seed + layer_idx,
+-                    group_size=args.group_size,
+-                    num_rotations=args.num_rotations,
+-                )
+-                channel_scales = torch.ones(1, weight.shape[1], dtype=torch.float16, device=device)
++                if args.method == "sphquant":
++                    new_module = SPHPseudoQuantizedLinear(
++                        old_module,
++                        sample_size=args.sph_sample_size,
++                        kmeans_iterations=args.sph_kmeans_iterations,
++                        seed=args.seed + layer_idx,
++                    )
++                else:
++                    from paroquant.optim.qlinear import PseudoQuantizedLinear
++
++                    weight = old_module.weight.float()
++                    rotation_pairs = init_rotation_data(
++                        weight,
++                        seed=args.seed + layer_idx,
++                        group_size=args.group_size,
++                        num_rotations=args.num_rotations,
++                    )
++                    channel_scales = torch.ones(
++                        1,
++                        weight.shape[1],
++                        dtype=torch.float16,
++                        device=device,
++                    )
+ 
+-                new_module = PseudoQuantizedLinear(
+-                    old_module,
+-                    rotation_pairs,
+-                    channel_scales,
+-                    group_size=args.group_size,
+-                    n_bits=args.n_bit,
+-                    num_rotations=args.num_rotations,
+-                )
++                    new_module = PseudoQuantizedLinear(
++                        old_module,
++                        rotation_pairs,
++                        channel_scales,
++                        group_size=args.group_size,
++                        n_bits=args.n_bit,
++                        num_rotations=args.num_rotations,
++                    )
+                 set_module_by_name(layer, name, new_module)
+-            elif is_fused_moe_experts(old_module):
++            else:
++                from paroquant.optim.qexperts import (
++                    PseudoQuantizedMoEExperts,
++                    is_fused_moe_experts,
++                )
++
++                if not is_fused_moe_experts(old_module):
++                    raise NotImplementedError(
++                        f"Unsupported module type: {type(old_module)}"
++                    )
+                 gate_up = old_module.gate_up_proj.float().view(-1, old_module.gate_up_proj.shape[-1])
+                 down = old_module.down_proj.float().view(-1, old_module.down_proj.shape[-1])
+                 gate_up_rotation_pairs = init_rotation_data(
+@@ -422,9 +574,6 @@ def main():
+                     num_rotations=args.num_rotations,
+                 )
+                 set_module_by_name(layer, name, new_module)
+-            else:
+-                raise NotImplementedError(f"Unsupported module type: {type(old_module)}")
+-
+             named_pseudo_modules[name] = new_module
+             old_module.cpu()
+ 
+@@ -457,13 +606,28 @@ def main():
+                         pseudo_module.reset_angles_by_mask()
+ 
+             train_kwargs_batches = [
+-                kwargs_list[layer_idx] | {k: retained_kwargs[k] for k in RETAINED_KWARG_KEYS if k in retained_kwargs}
+-                for retained_kwargs in new_retained_kwargs_batches
++                kwargs_batch
++                | {
++                    key: retained_kwargs[key]
++                    for key in RETAINED_KWARG_KEYS
++                    if key in retained_kwargs
++                }
++                for kwargs_batch, retained_kwargs in zip(
++                    kwargs_list[layer_idx],
++                    new_retained_kwargs_batches,
++                )
+             ]
+             val_kwargs_batches = [
+-                val_kwargs_list[layer_idx]
+-                | {k: retained_kwargs[k] for k in RETAINED_KWARG_KEYS if k in retained_kwargs}
+-                for retained_kwargs in new_val_retained_kwargs_batches
++                kwargs_batch
++                | {
++                    key: retained_kwargs[key]
++                    for key in RETAINED_KWARG_KEYS
++                    if key in retained_kwargs
++                }
++                for kwargs_batch, retained_kwargs in zip(
++                    val_kwargs_list[layer_idx],
++                    new_val_retained_kwargs_batches,
++                )
+             ]
+ 
+             for step, step_params_dict in enumerate(params_to_optimize):
+@@ -503,6 +667,9 @@ def main():
+                     post_optim_callback=_reset_named_angles,
+                     metric_logger=wandb_metric_logger,
+                     start_step=layer_step,
++                    optimizer_name=args.optimizer,
++                    use_lr_scheduler=args.use_lr_scheduler,
++                    autocast_dtype=model_dtype,
+                 )
+ 
+             set_checkpointing_enabled(named_pseudo_modules, False)
+@@ -518,7 +685,7 @@ def main():
+         else:
+             logger.info(f"Skipping optimization for layer {layer_idx}: already been optimized.")
+ 
+-        layer.half().to(device)
++        layer.to(dtype=model_dtype, device=device)
+ 
+         logger.info("Capturing new layer output...")
+         new_layer_output_batches = forward_layer_batch(
+diff --git a/paroquant/optim/multimodal.py b/paroquant/optim/multimodal.py
+new file mode 100644
+index 0000000..61c8b0b
+--- /dev/null
++++ b/paroquant/optim/multimodal.py
+@@ -0,0 +1,109 @@
++from __future__ import annotations
++
++import json
++import math
++from collections.abc import Iterator
++from pathlib import Path
++
++import torch
++from PIL import Image
++from transformers import AutoProcessor
++
++
++def _conversation(record: dict, image: Image.Image) -> list[dict]:
++    turns = record["conversations"]
++    if len(turns) != 2 or turns[0]["from"] != "human" or turns[1]["from"] != "gpt":
++        raise ValueError(f"Unexpected ShareGPT4V conversation for {record['id']}")
++    prompt = turns[0]["value"].replace("<image>", "").strip()
++    caption = turns[1]["value"].strip()
++    return [
++        {
++            "role": "user",
++            "content": [
++                {"type": "image", "image": image},
++                {"type": "text", "text": prompt},
++            ],
++        },
++        {
++            "role": "assistant",
++            "content": [{"type": "text", "text": caption}],
++        },
++    ]
++
++
++class CocoCalibrationBatches:
++    """Re-iterable processor batches backed by a frozen COCO manifest."""
++
++    def __init__(
++        self,
++        manifest_path: str | Path,
++        *,
++        model_path: str | Path,
++        split: str,
++        batch_size: int,
++        limit: int | None = None,
++    ) -> None:
++        if split not in {"train", "validation"}:
++            raise ValueError(f"Unsupported split: {split}")
++        if batch_size <= 0:
++            raise ValueError("batch_size must be positive")
++        manifest_path = Path(manifest_path)
++        manifest = json.loads(manifest_path.read_text())
++        self.records = []
++        for source_record in manifest["records"]:
++            if source_record["split"] != split:
++                continue
++            record = dict(source_record)
++            image_path = Path(record["image"])
++            if not image_path.is_absolute():
++                image_path = manifest_path.parent / image_path
++            record["image"] = str(image_path)
++            self.records.append(record)
++        if limit is not None:
++            self.records = self.records[:limit]
++        if not self.records:
++            raise ValueError(f"No {split} samples found in {manifest_path}")
++        self.batch_size = min(batch_size, len(self.records))
++        if len(self.records) % self.batch_size:
++            raise ValueError(
++                f"{split} sample count {len(self.records)} must be divisible by "
++                f"batch size {self.batch_size}"
++            )
++        self.processor = AutoProcessor.from_pretrained(
++            model_path,
++            trust_remote_code=True,
++            local_files_only=True,
++        )
++        tokenizer = getattr(self.processor, "tokenizer", None)
++        if tokenizer is not None and tokenizer.pad_token_id is None:
++            tokenizer.pad_token = tokenizer.eos_token
++
++    def __len__(self) -> int:
++        return math.ceil(len(self.records) / self.batch_size)
++
++    def __iter__(self) -> Iterator[dict[str, torch.Tensor]]:
++        for start in range(0, len(self.records), self.batch_size):
++            records = self.records[start : start + self.batch_size]
++            images = [Image.open(record["image"]).convert("RGB") for record in records]
++            try:
++                conversations = [
++                    _conversation(record, image)
++                    for record, image in zip(records, images)
++                ]
++                batch = self.processor.apply_chat_template(
++                    conversations,
++                    tokenize=True,
++                    add_generation_prompt=False,
++                    enable_thinking=False,
++                    processor_kwargs={"padding": True},
++                    return_dict=True,
++                    return_tensors="pt",
++                )
++            finally:
++                for image in images:
++                    image.close()
++            yield {
++                key: value
++                for key, value in batch.items()
++                if isinstance(value, torch.Tensor)
++            }
+diff --git a/paroquant/optim/sphlinear.py b/paroquant/optim/sphlinear.py
+new file mode 100644
+index 0000000..60399a2
+--- /dev/null
++++ b/paroquant/optim/sphlinear.py
+@@ -0,0 +1,332 @@
++from __future__ import annotations
++
++import math
++
++import torch
++import torch.nn.functional as F
++from torch import nn
++from torch.utils.checkpoint import checkpoint
++
++VECTOR_SIZE = 8
++GROUP_SIZE = 128
++RADIUS_BITS = 4
++NUM_DIRECTIONS = 64
++ANGLE_EPS = 1e-4
++
++
++def softplus_inverse(value: torch.Tensor) -> torch.Tensor:
++    value = value.float().clamp_min(1e-8)
++    return value + torch.log(-torch.expm1(-value))
++
++
++def direction_codebook_from_logits(
++    angle_logits: torch.Tensor,
++    *,
++    angle_eps: float = ANGLE_EPS,
++) -> torch.Tensor:
++    if angle_logits.shape[-1] != VECTOR_SIZE - 1:
++        raise ValueError(f"Expected seven angular logits, got {angle_logits.shape}")
++    theta = angle_eps + (math.pi / 2 - 2 * angle_eps) * torch.sigmoid(
++        angle_logits.float()
++    )
++    sin_theta = torch.sin(theta)
++    cos_theta = torch.cos(theta)
++    prefix = torch.cumprod(sin_theta, dim=-1)
++    components = [cos_theta[..., :1]]
++    for index in range(1, VECTOR_SIZE - 1):
++        components.append(
++            prefix[..., index - 1 : index]
++            * cos_theta[..., index : index + 1]
++        )
++    components.append(prefix[..., -1:])
++    directions = torch.cat(components, dim=-1)
++    return directions / directions.norm(dim=-1, keepdim=True).clamp_min(1e-12)
++
++
++def direction_logits_from_codebook(codebook: torch.Tensor) -> torch.Tensor:
++    unit = codebook.float().clamp_min(0)
++    unit = unit / unit.norm(dim=-1, keepdim=True).clamp_min(1e-12)
++    theta = []
++    for index in range(VECTOR_SIZE - 1):
++        denominator = unit[..., index:].norm(dim=-1).clamp_min(1e-12)
++        theta.append(torch.acos((unit[..., index] / denominator).clamp(0, 1)))
++    theta = torch.stack(theta, dim=-1).clamp(
++        min=ANGLE_EPS,
++        max=math.pi / 2 - ANGLE_EPS,
++    )
++    normalized = (theta - ANGLE_EPS) / (math.pi / 2 - 2 * ANGLE_EPS)
++    return torch.logit(normalized.clamp(1e-7, 1 - 1e-7))
++
++
++def radius_fake_quantize(
++    radius: torch.Tensor,
++    *,
++    bits: int = RADIUS_BITS,
++    group_size: int = GROUP_SIZE,
++) -> torch.Tensor:
++    vectors_per_group = group_size // VECTOR_SIZE
++    if radius.ndim != 2 or radius.shape[1] % vectors_per_group:
++        raise ValueError(
++            f"Radius shape must be [rows, multiple of {vectors_per_group}], "
++            f"got {tuple(radius.shape)}"
++        )
++    groups = radius.float().reshape(radius.shape[0], -1, vectors_per_group)
++    detached = groups.detach()
++    minimum = detached.amin(dim=-1, keepdim=True)
++    maximum = detached.amax(dim=-1, keepdim=True)
++    levels = (1 << bits) - 1
++    scale = (maximum - minimum) / levels
++    safe_scale = torch.where(scale > 0, scale, torch.ones_like(scale))
++    codes = torch.round((detached - minimum) / safe_scale).clamp(0, levels)
++    dequantized = minimum + codes * safe_scale
++    dequantized = torch.where(scale > 0, dequantized, minimum)
++    dequantized = dequantized.reshape_as(radius)
++    return radius + (dequantized - radius).detach()
++
++
++@torch.no_grad()
++def assign_directions(
++    directions: torch.Tensor,
++    codebook: torch.Tensor,
++    *,
++    chunk_size: int = 262144,
++) -> torch.Tensor:
++    assignments = torch.empty(
++        directions.shape[0],
++        dtype=torch.long,
++        device=directions.device,
++    )
++    for start in range(0, directions.shape[0], chunk_size):
++        end = min(start + chunk_size, directions.shape[0])
++        assignments[start:end] = (
++            directions[start:end].float() @ codebook.float().T
++        ).argmax(dim=1)
++    return assignments
++
++
++@torch.no_grad()
++def spherical_kmeans(
++    directions: torch.Tensor,
++    radius: torch.Tensor,
++    *,
++    sample_size: int = 65536,
++    iterations: int = 20,
++    seed: int = 0,
++) -> torch.Tensor:
++    if directions.ndim != 2 or directions.shape[1] != VECTOR_SIZE:
++        raise ValueError(f"Expected [N, 8] directions, got {directions.shape}")
++    if directions.shape[0] < NUM_DIRECTIONS:
++        raise ValueError("Not enough vectors for a 64-entry direction codebook")
++    weights = radius.float().square()
++    if float(weights.sum()) == 0:
++        probabilities = torch.full_like(weights, 1 / weights.numel())
++    else:
++        probabilities = weights / weights.sum()
++    generator = torch.Generator(device=directions.device).manual_seed(seed)
++    sample_count = min(sample_size, directions.shape[0])
++    sampled_ids = torch.multinomial(
++        probabilities,
++        sample_count,
++        replacement=False,
++        generator=generator,
++    )
++    sampled = directions[sampled_ids].float()
++    initial = torch.randperm(
++        sample_count,
++        device=directions.device,
++        generator=generator,
++    )[:NUM_DIRECTIONS]
++    centers = sampled[initial].clone()
++    centers /= centers.norm(dim=1, keepdim=True).clamp_min(1e-12)
++    for _ in range(iterations):
++        assignments = assign_directions(sampled, centers)
++        sums = torch.zeros_like(centers)
++        counts = torch.zeros(
++            NUM_DIRECTIONS,
++            dtype=torch.long,
++            device=centers.device,
++        )
++        sums.index_add_(0, assignments, sampled)
++        counts.index_add_(0, assignments, torch.ones_like(assignments))
++        nonempty = counts > 0
++        centers[nonempty] = sums[nonempty] / counts[nonempty, None]
++        centers /= centers.norm(dim=1, keepdim=True).clamp_min(1e-12)
++    return centers
++
++
++@torch.no_grad()
++def initialize_spherical_weight(
++    weight: torch.Tensor,
++    *,
++    sample_size: int = 65536,
++    kmeans_iterations: int = 20,
++    seed: int = 0,
++) -> dict[str, torch.Tensor]:
++    if weight.ndim != 2 or weight.shape[1] % GROUP_SIZE:
++        raise ValueError(
++            f"Expected 2D weight with input divisible by {GROUP_SIZE}, "
++            f"got {tuple(weight.shape)}"
++        )
++    positive = weight.float().abs().reshape(-1, VECTOR_SIZE)
++    radius = positive.norm(dim=1)
++    directions = positive / radius[:, None].clamp_min(1e-12)
++    zero = radius == 0
++    if bool(zero.any()):
++        directions[zero] = 1 / math.sqrt(VECTOR_SIZE)
++    codebook = spherical_kmeans(
++        directions,
++        radius,
++        sample_size=sample_size,
++        iterations=kmeans_iterations,
++        seed=seed,
++    )
++    indices = assign_directions(directions, codebook)
++    selected = codebook[indices]
++    ls_radius = (positive * selected).sum(dim=1).clamp_min(1e-8)
++    vector_shape = (weight.shape[0], weight.shape[1] // VECTOR_SIZE)
++    return {
++        "signs": torch.where(weight >= 0, 1, -1).to(torch.int8),
++        "direction_indices": indices.reshape(vector_shape).to(torch.uint8),
++        "radius_logits": softplus_inverse(ls_radius).reshape(vector_shape),
++        "angle_logits": direction_logits_from_codebook(codebook),
++    }
++
++
++def materialize_spherical_weight(
++    signs: torch.Tensor,
++    direction_indices: torch.Tensor,
++    radius_logits: torch.Tensor,
++    angle_logits: torch.Tensor,
++    radius_bits: torch.Tensor,
++    group_size: torch.Tensor,
++) -> torch.Tensor:
++    codebook = direction_codebook_from_logits(angle_logits)
++    directions = codebook[direction_indices.long()]
++    radius = radius_fake_quantize(
++        F.softplus(radius_logits.float()),
++        bits=int(radius_bits),
++        group_size=int(group_size),
++    )
++    signed = signs.reshape(signs.shape[0], -1, VECTOR_SIZE).float()
++    return (signed * directions * radius[..., None]).reshape_as(signs)
++
++
++class SPHPseudoQuantizedLinear(nn.Module):
++    def __init__(
++        self,
++        linear: nn.Linear,
++        *,
++        sample_size: int = 65536,
++        kmeans_iterations: int = 20,
++        seed: int = 0,
++        initialized: dict[str, torch.Tensor] | None = None,
++    ) -> None:
++        super().__init__()
++        self.enable_checkpoint = False
++        if initialized is None:
++            initialized = initialize_spherical_weight(
++                linear.weight,
++                sample_size=sample_size,
++                kmeans_iterations=kmeans_iterations,
++                seed=seed,
++            )
++        self.register_buffer("signs", initialized["signs"].contiguous())
++        self.register_buffer(
++            "direction_indices",
++            initialized["direction_indices"].contiguous(),
++        )
++        self.radius_logits = nn.Parameter(
++            initialized["radius_logits"].float().contiguous()
++        )
++        self.angle_logits = nn.Parameter(
++            initialized["angle_logits"].float().contiguous()
++        )
++        if linear.bias is None:
++            self.register_buffer("bias", None)
++        else:
++            self.bias = nn.Parameter(linear.bias.detach().clone())
++            self.bias.requires_grad_(False)
++        self.register_buffer(
++            "radius_bits",
++            torch.tensor(RADIUS_BITS, dtype=torch.int32),
++        )
++        self.register_buffer(
++            "group_size",
++            torch.tensor(GROUP_SIZE, dtype=torch.int32),
++        )
++        self.register_buffer(
++            "sphquant_version",
++            torch.tensor(1, dtype=torch.int32),
++        )
++
++    def checkpointed(self, fn, *args):
++        if torch.is_grad_enabled() and self.enable_checkpoint:
++            return checkpoint(fn, *args, use_reentrant=False)
++        return fn(*args)
++
++    def materialized_weight(self) -> torch.Tensor:
++        return self.checkpointed(
++            materialize_spherical_weight,
++            self.signs,
++            self.direction_indices,
++            self.radius_logits,
++            self.angle_logits,
++            self.radius_bits,
++            self.group_size,
++        )
++
++    def forward(self, x: torch.Tensor) -> torch.Tensor:
++        weight = self.materialized_weight().to(x.dtype)
++        return F.linear(x, weight, self.bias)
++
++    def set_optim_enabled(
++        self,
++        *,
++        radius: bool = False,
++        codebook: bool = False,
++        **unexpected,
++    ) -> None:
++        if unexpected:
++            raise ValueError(f"Unknown SPHQuant parameters: {sorted(unexpected)}")
++        self.radius_logits.requires_grad_(radius)
++        self.angle_logits.requires_grad_(codebook)
++        if self.bias is not None:
++            self.bias.requires_grad_(False)
++
++    def get_optim_params(self, name: str) -> list[nn.Parameter]:
++        if name == "radius":
++            return [self.radius_logits]
++        if name == "codebook":
++            return [self.angle_logits]
++        raise ValueError(f"Unknown SPHQuant parameter group: {name}")
++
++    @torch.no_grad()
++    def pseudo_weight(self) -> torch.Tensor:
++        return self.materialized_weight().detach()
++
++    @torch.no_grad()
++    def reset_angles_by_mask(self) -> None:
++        return None
++
++    @classmethod
++    def from_state_dict(
++        cls,
++        state_dict: dict[str, torch.Tensor],
++    ) -> "SPHPseudoQuantizedLinear":
++        signs = state_dict["signs"]
++        linear = nn.Linear(
++            signs.shape[1],
++            signs.shape[0],
++            bias="bias" in state_dict and state_dict["bias"] is not None,
++            device=signs.device,
++            dtype=torch.float32,
++        )
++        initialized = {
++            "signs": signs,
++            "direction_indices": state_dict["direction_indices"],
++            "radius_logits": state_dict["radius_logits"],
++            "angle_logits": state_dict["angle_logits"],
++        }
++        module = cls(linear, initialized=initialized)
++        module.load_state_dict(state_dict)
++        return module
+diff --git a/paroquant/optim/train.py b/paroquant/optim/train.py
+index f04d86a..c25c8eb 100644
+--- a/paroquant/optim/train.py
++++ b/paroquant/optim/train.py
+@@ -10,7 +10,7 @@ import torch
+ import torch.nn as nn
+ from tqdm import tqdm
+ 
+-from .util import CosineAnnealingParam, RETAINED_KWARG_KEYS, logger, to_device
++from .util import CosineAnnealingParam, logger, to_device
+ 
+ 
+ def _get_independent_channel_pairs(
+@@ -106,6 +106,9 @@ def optimize_module(
+     post_optim_callback: Callable[[nn.Module], None] | None = None,
+     metric_logger: Callable[[dict[str, float], int], None] | None = None,
+     start_step: int = 0,
++    optimizer_name: Literal["adam", "adamw"] = "adamw",
++    use_lr_scheduler: bool = True,
++    autocast_dtype: torch.dtype = torch.float16,
+ ) -> int:
+     train_args_batches, train_output_batches = train_set_batches
+     val_args_batches, val_output_batches = val_set_batches
+@@ -115,16 +118,26 @@ def optimize_module(
+ 
+     num_train_batches = len(train_args_batches)
+     total_steps = n_iter * math.ceil(num_train_batches / gradient_accumulation_steps)
+-    schedulers = [
+-        CosineAnnealingParam(
+-            start_value=param_group["lr"],
+-            end_value=param_group["lr"] / 20,
+-            T_max=total_steps,
+-        )
+-        for param_group in optim_params
+-    ]
+-    optimizer = torch.optim.AdamW(optim_params)
+-    scaler = torch.amp.GradScaler()
++    schedulers = (
++        [
++            CosineAnnealingParam(
++                start_value=param_group["lr"],
++                end_value=param_group["lr"] / 20,
++                T_max=total_steps,
++            )
++            for param_group in optim_params
++        ]
++        if use_lr_scheduler
++        else []
++    )
++    optimizer_cls = (
++        torch.optim.Adam if optimizer_name == "adam" else torch.optim.AdamW
++    )
++    optimizer = optimizer_cls(optim_params)
++    scaler = torch.amp.GradScaler(
++        "cuda",
++        enabled=autocast_dtype == torch.float16,
++    )
+     if loss_fn == "mse":
+         loss = nn.MSELoss()
+     elif loss_fn == "smooth_l1":
+@@ -140,9 +153,7 @@ def optimize_module(
+             batch_kwargs = {
+                 key: value.copy() if isinstance(value, dict) else value for key, value in kwargs[batch_idx].items()
+             }
+-            for key in RETAINED_KWARG_KEYS:
+-                if key in batch_kwargs:
+-                    batch_kwargs[key] = to_device(batch_kwargs[key], args[0].device)
++            batch_kwargs = to_device(batch_kwargs, args[0].device)
+         out = module(*args, **batch_kwargs)
+         if isinstance(out, tuple):
+             out = out[0]
+@@ -163,7 +174,10 @@ def optimize_module(
+                 total_loss += loss_value
+         return total_loss / len(args_batches)
+ 
+-    with torch.no_grad(), torch.amp.autocast("cuda"):
++    with torch.no_grad(), torch.amp.autocast(
++        "cuda",
++        dtype=autocast_dtype,
++    ):
+         original_val_loss = val_loss_batches(val_args_batches, val_output_batches)
+ 
+     best_val_loss = original_val_loss
+@@ -193,7 +207,7 @@ def optimize_module(
+                 remaining_batches = num_train_batches - batch_idx + 1
+                 window_size = min(gradient_accumulation_steps, remaining_batches)
+ 
+-            with torch.amp.autocast("cuda"):
++            with torch.amp.autocast("cuda", dtype=autocast_dtype):
+                 output_q = module_output(args_batch, train_kwargs, batch_idx - 1)
+                 batch_loss = loss(output_batch, output_q)
+                 loss_value = batch_loss / window_size
+@@ -219,7 +233,10 @@ def optimize_module(
+                     metric_logger({"loss": accum_loss / window_size}, current_step)
+                 accum_loss = 0.0
+ 
+-        with torch.no_grad(), torch.amp.autocast("cuda"):
++        with torch.no_grad(), torch.amp.autocast(
++            "cuda",
++            dtype=autocast_dtype,
++        ):
+             val_loss_value = val_loss_batches(val_args_batches, val_output_batches)
+ 
+         if val_loss_value < best_val_loss:
+diff --git a/paroquant/optim/util.py b/paroquant/optim/util.py
+index b5b7d1a..b5ac9a0 100644
+--- a/paroquant/optim/util.py
++++ b/paroquant/optim/util.py
+@@ -5,13 +5,19 @@ import logging
+ import math
+ import random
+ import warnings
++from collections.abc import Iterable
+ from typing import TypeVar
+ 
+ import torch
+ import torch.nn as nn
+ from datasets import load_dataset
+ from tqdm import tqdm
+-from transformers import AutoModelForCausalLM, AutoTokenizer, AutoConfig
++from transformers import (
++    AutoModelForCausalLM,
++    AutoModelForImageTextToText,
++    AutoTokenizer,
++    AutoConfig,
++)
+ 
+ 
+ RETAINED_KWARG_KEYS = ("shared_kv_states",)
+@@ -70,8 +76,11 @@ def set_module_by_name(layer, name, new_module):
+ 
+ 
+ def load_model(model_path: str, device_map: str | None = None, dtype=torch.float32, **kwargs) -> nn.Module:
+-    model = AutoModelForCausalLM.from_pretrained(model_path, device_map=device_map, dtype=dtype, **kwargs)
+-    return model
++    common = dict(device_map=device_map, dtype=dtype, **kwargs)
++    try:
++        return AutoModelForImageTextToText.from_pretrained(model_path, **common)
++    except (ValueError, KeyError):
++        return AutoModelForCausalLM.from_pretrained(model_path, **common)
+ 
+ 
+ def load_tokenizer(model_path: str, **kwargs) -> AutoTokenizer:
+@@ -155,7 +164,11 @@ def get_calib_dataset(
+         dataset = load_dataset("mit-han-lab/pile-val-backup", split="validation")
+         dataset = dataset.shuffle(seed=seed)
+     elif data == "wikitext2":
+-        dataset = load_dataset("wikitext", "wikitext-2-raw-v1", split=split)
++        dataset = load_dataset(
++            "Salesforce/wikitext",
++            "wikitext-2-raw-v1",
++            split=split,
++        )
+         dataset = dataset.shuffle(seed=seed)
+     elif data == "c4":
+         if split == "train":
+@@ -218,14 +231,38 @@ def get_calib_dataset(
+ def capture_layer_inputs_and_args(
+     model: nn.Module,
+     layers: nn.ModuleList,
+-    samples: torch.Tensor,
++    samples: torch.Tensor | Iterable[dict[str, torch.Tensor]],
+     batch_size: int | None,
+-) -> tuple[list[torch.Tensor], list[dict], list[list[tuple[torch.Tensor, ...]]], list[dict]]:
+-    device = samples.device
+-    kwargs_list: list[dict] = [{} for _ in range(len(layers))]
++    device: torch.device | str | None = None,
++) -> tuple[
++    list[torch.Tensor],
++    list[list[dict]],
++    list[list[tuple[torch.Tensor, ...]]],
++    list[dict],
++]:
++    if isinstance(samples, torch.Tensor):
++        device = samples.device
++    elif device is None:
++        raise ValueError("device is required for iterable model-input batches")
++    kwargs_batches_list: list[list[dict]] = [[] for _ in range(len(layers))]
+     first_layer_input_batches: list[torch.Tensor] = []
+     other_args_batches_list: list[list[tuple[torch.Tensor, ...]]] = [[] for _ in range(len(layers))]
+     retained_kwargs_batches: list[dict] = []
++    cpu_tensor_cache: dict[tuple[int, int], torch.Tensor] = {}
++
++    def to_cpu_cached(value, batch_idx: int):
++        if isinstance(value, torch.Tensor):
++            key = (batch_idx, id(value))
++            if key not in cpu_tensor_cache:
++                cpu_tensor_cache[key] = value.cpu()
++            return cpu_tensor_cache[key]
++        if isinstance(value, list):
++            return [to_cpu_cached(item, batch_idx) for item in value]
++        if isinstance(value, tuple):
++            return tuple(to_cpu_cached(item, batch_idx) for item in value)
++        if isinstance(value, dict):
++            return {key: to_cpu_cached(item, batch_idx) for key, item in value.items()}
++        return value
+ 
+     class Catcher(nn.Module):
+ 
+@@ -236,21 +273,28 @@ def capture_layer_inputs_and_args(
+             object.__setattr__(self, "layer_idx", layer_idx)
+ 
+         def forward(self, *args, **kwargs):
++            batch_idx = len(other_args_batches_list[self.layer_idx])
+             if self.layer_idx == 0:
+                 first_layer_input_batches.append(args[0].cpu())
+ 
+-            # Capture kwargs for all layers.
+-            layer_kwargs = kwargs_list[self.layer_idx]
+-            if len(layer_kwargs) == 0:
+-                layer_kwargs.update({k: v for k, v in kwargs.items() if k not in RETAINED_KWARG_KEYS})
+-                layer_kwargs.pop("use_cache", None)
+-                layer_kwargs.pop("past_key_value", None)
+-                layer_kwargs.pop("past_key_values", None)
++            layer_kwargs = {
++                key: to_cpu_cached(value, batch_idx)
++                for key, value in kwargs.items()
++                if key not in RETAINED_KWARG_KEYS
++            }
++            layer_kwargs.pop("use_cache", None)
++            layer_kwargs.pop("past_key_value", None)
++            layer_kwargs.pop("past_key_values", None)
++            kwargs_batches_list[self.layer_idx].append(layer_kwargs)
+ 
+             other_args_batches_list[self.layer_idx].append(
+-                tuple(arg.cpu() if isinstance(arg, torch.Tensor) else arg for arg in args[1:])
++                tuple(to_cpu_cached(arg, batch_idx) for arg in args[1:])
+             )
+-            retained_kwargs = {k: to_device(kwargs[k], "cpu") for k in RETAINED_KWARG_KEYS if k in kwargs}
++            retained_kwargs = {
++                key: to_cpu_cached(kwargs[key], batch_idx)
++                for key in RETAINED_KWARG_KEYS
++                if key in kwargs
++            }
+             if self.layer_idx == 0:
+                 retained_kwargs_batches.append(retained_kwargs)
+ 
+@@ -262,18 +306,25 @@ def capture_layer_inputs_and_args(
+     for layer_idx, layer in enumerate(layers):
+         layers[layer_idx] = Catcher(layer, layer_idx)
+ 
+-    batch_size = samples.shape[0] if batch_size is None or batch_size <= 0 else batch_size
+-    num_batches = samples.shape[0] // batch_size
+-    samples_batch = samples.chunk(num_batches)
+-    for samples in samples_batch:
+-        model(samples)
++    if isinstance(samples, torch.Tensor):
++        batch_size = samples.shape[0] if batch_size is None or batch_size <= 0 else batch_size
++        if samples.shape[0] % batch_size:
++            raise ValueError(
++                f"Sample count {samples.shape[0]} must be divisible by batch size {batch_size}"
++            )
++        num_batches = samples.shape[0] // batch_size
++        for sample_batch in samples.chunk(num_batches):
++            model(sample_batch)
++    else:
++        for model_inputs in samples:
++            model(**to_device(model_inputs, device), use_cache=False)
+ 
+     for layer_idx, layer in enumerate(layers):
+         layers[layer_idx] = layer.module
+ 
+     return (
+         first_layer_input_batches,
+-        kwargs_list,
++        kwargs_batches_list,
+         other_args_batches_list,
+         retained_kwargs_batches,
+     )
+diff --git a/tests/test_sph_launcher.py b/tests/test_sph_launcher.py
+new file mode 100644
+index 0000000..f44ac1b
+--- /dev/null
++++ b/tests/test_sph_launcher.py
+@@ -0,0 +1,71 @@
++import os
++import subprocess
++import tempfile
++import unittest
++from pathlib import Path
++
++
++REPO_ROOT = Path(__file__).resolve().parents[1]
++LAUNCHER = REPO_ROOT / "experiments" / "sphquant" / "qwen3_4b.sh"
++QWEN35_LAUNCHER = REPO_ROOT / "experiments" / "sphquant" / "qwen3_5_9b.sh"
++
++
++class SphLauncherTest(unittest.TestCase):
++    def dry_run(self, mode: str) -> str:
++        with tempfile.TemporaryDirectory() as tmp:
++            root = Path(tmp)
++            model = root / "model"
++            model.mkdir()
++            (model / "config.json").write_text("{}\n")
++            env = {
++                **os.environ,
++                "MODEL": str(model),
++                "CALIBRATION": str(root / "calibration.pt"),
++                "OUTPUT_DIR": str(root / "output"),
++                "MODE": mode,
++                "SMOKE": "1",
++                "DRY_RUN": "1",
++            }
++            return subprocess.run(
++                ["bash", str(LAUNCHER)],
++                check=True,
++                capture_output=True,
++                env=env,
++                text=True,
++            ).stdout
++
++    def test_smoke_cache_shards_divide_captured_batches(self):
++        self.assertIn("--cache-shards 2", self.dry_run("init"))
++        self.assertIn("--cache-shards 5", self.dry_run("layerwise"))
++
++    def test_qwen35_launcher_uses_multimodal_bfloat16_protocol(self):
++        with tempfile.TemporaryDirectory() as tmp:
++            root = Path(tmp)
++            model = root / "model"
++            model.mkdir()
++            (model / "config.json").write_text("{}\n")
++            env = {
++                **os.environ,
++                "MODEL": str(model),
++                "CALIBRATION": str(root / "coco_manifest.json"),
++                "OUTPUT_DIR": str(root / "output"),
++                "MODE": "layerwise",
++                "SMOKE": "1",
++                "DRY_RUN": "1",
++            }
++            output = subprocess.run(
++                ["bash", str(QWEN35_LAUNCHER)],
++                check=True,
++                capture_output=True,
++                env=env,
++                text=True,
++            ).stdout
++        self.assertIn("--multimodal-calibration-path", output)
++        self.assertIn("--model-dtype bfloat16", output)
++        self.assertIn("--max-layers 1", output)
++        self.assertIn("--calibration-limit 80", output)
++        self.assertIn("--cache-shards 5", output)
++
++
++if __name__ == "__main__":
++    unittest.main()
+diff --git a/tests/test_sph_qwen3.py b/tests/test_sph_qwen3.py
+new file mode 100644
+index 0000000..f8ef3ab
+--- /dev/null
++++ b/tests/test_sph_qwen3.py
+@@ -0,0 +1,54 @@
++import torch
++from transformers import Qwen3Config, Qwen3ForCausalLM
++
++from paroquant.optim.sphlinear import SPHPseudoQuantizedLinear
++from paroquant.optim.util import get_named_linears, set_module_by_name
++
++
++EXPECTED = {
++    "self_attn.q_proj",
++    "self_attn.k_proj",
++    "self_attn.v_proj",
++    "self_attn.o_proj",
++    "mlp.gate_proj",
++    "mlp.up_proj",
++    "mlp.down_proj",
++}
++
++
++def test_tiny_qwen3_layer_has_exact_sph_projection_coverage():
++    model = Qwen3ForCausalLM(
++        Qwen3Config(
++            vocab_size=64,
++            hidden_size=128,
++            intermediate_size=256,
++            num_hidden_layers=1,
++            num_attention_heads=4,
++            num_key_value_heads=2,
++            head_dim=32,
++        )
++    ).eval()
++    layer = model.model.layers[0]
++    linears = get_named_linears(layer)
++    assert set(linears) == EXPECTED
++    for name, linear in linears.items():
++        set_module_by_name(
++            layer,
++            name,
++            SPHPseudoQuantizedLinear(
++                linear,
++                sample_size=64,
++                kmeans_iterations=1,
++                seed=0,
++            ),
++        )
++    sph_linears = {
++        name: module
++        for name, module in layer.named_modules()
++        if isinstance(module, SPHPseudoQuantizedLinear)
++    }
++    assert set(sph_linears) == EXPECTED
++    with torch.no_grad():
++        logits = model(torch.randint(0, 64, (1, 8))).logits
++    assert logits.shape == (1, 8, 64)
++    assert torch.isfinite(logits).all()
+diff --git a/tests/test_sphconvert.py b/tests/test_sphconvert.py
+new file mode 100644
+index 0000000..3e3e7cd
+--- /dev/null
++++ b/tests/test_sphconvert.py
+@@ -0,0 +1,47 @@
++import json
++
++import torch
++from safetensors.torch import save_file
++
++from paroquant.cli.convert import _append_missing_source_weights
++
++
++def test_pseudo_export_preserves_only_requested_quantized_weights(tmp_path):
++    shard = tmp_path / "model-00001-of-00001.safetensors"
++    source = {
++        "model.layers.0.proj.weight": torch.ones(2, 2),
++        "model.visual.proj.weight": torch.full((2, 2), 2.0),
++        "mtp.layers.0.proj.weight": torch.full((2, 2), 3.0),
++    }
++    save_file(source, shard)
++    (tmp_path / "model.safetensors.index.json").write_text(
++        json.dumps(
++            {
++                "metadata": {},
++                "weight_map": {name: shard.name for name in source},
++            }
++        )
++    )
++    model_state = {
++        "model.layers.0.proj.weight": torch.zeros(2, 2),
++        "model.visual.proj.weight": torch.zeros(2, 2),
++        "runtime.buffer": torch.tensor([4.0]),
++    }
++    merged = _append_missing_source_weights(
++        model_state,
++        tmp_path,
++        {"model.layers.0.proj.weight"},
++    )
++    torch.testing.assert_close(
++        merged["model.layers.0.proj.weight"],
++        torch.zeros(2, 2),
++    )
++    torch.testing.assert_close(
++        merged["model.visual.proj.weight"],
++        source["model.visual.proj.weight"],
++    )
++    torch.testing.assert_close(
++        merged["mtp.layers.0.proj.weight"],
++        source["mtp.layers.0.proj.weight"],
++    )
++    torch.testing.assert_close(merged["runtime.buffer"], torch.tensor([4.0]))
+diff --git a/tests/test_sphlinear.py b/tests/test_sphlinear.py
+new file mode 100644
+index 0000000..f219ea7
+--- /dev/null
++++ b/tests/test_sphlinear.py
+@@ -0,0 +1,76 @@
++import torch
++from torch import nn
++
++from paroquant.optim.sphlinear import (
++    SPHPseudoQuantizedLinear,
++    direction_codebook_from_logits,
++    direction_logits_from_codebook,
++    radius_fake_quantize,
++)
++
++
++def test_angular_codebook_is_positive_unit_and_roundtrips():
++    logits = torch.linspace(-2, 2, 64 * 7).reshape(64, 7)
++    codebook = direction_codebook_from_logits(logits)
++    assert torch.all(codebook > 0)
++    torch.testing.assert_close(
++        codebook.norm(dim=-1),
++        torch.ones(64),
++        rtol=1e-6,
++        atol=1e-6,
++    )
++    restored = direction_codebook_from_logits(
++        direction_logits_from_codebook(codebook)
++    )
++    torch.testing.assert_close(restored, codebook, rtol=2e-5, atol=2e-5)
++
++
++def test_radius_fake_quant_has_16_levels_and_identity_ste():
++    radius = torch.linspace(0.1, 2, 32).reshape(2, 16).requires_grad_(True)
++    quantized = radius_fake_quantize(radius)
++    assert all(row.unique().numel() <= 16 for row in quantized)
++    quantized.sum().backward()
++    torch.testing.assert_close(radius.grad, torch.ones_like(radius))
++
++
++def test_sph_linear_forward_backward_and_state_roundtrip():
++    torch.manual_seed(0)
++    linear = nn.Linear(128, 4, bias=False)
++    module = SPHPseudoQuantizedLinear(
++        linear,
++        sample_size=64,
++        kmeans_iterations=2,
++        seed=0,
++    )
++    module.set_optim_enabled(radius=True, codebook=True)
++    x = torch.randn(3, 128, requires_grad=True)
++    indices_before = module.direction_indices.clone()
++    output = module(x)
++    output.square().mean().backward()
++    assert torch.isfinite(output).all()
++    assert torch.isfinite(module.radius_logits.grad).all()
++    assert torch.isfinite(module.angle_logits.grad).all()
++    assert module.radius_logits.grad.abs().sum() > 0
++    assert module.angle_logits.grad.abs().sum() > 0
++
++    restored = SPHPseudoQuantizedLinear.from_state_dict(module.state_dict())
++    torch.testing.assert_close(restored(x.detach()), output.detach())
++    torch.testing.assert_close(restored.pseudo_weight(), module.pseudo_weight())
++    torch.optim.Adam(
++        [module.radius_logits, module.angle_logits],
++        lr=1e-3,
++    ).step()
++    torch.testing.assert_close(module.direction_indices, indices_before)
++
++
++def test_only_requested_parameter_groups_are_trainable():
++    module = SPHPseudoQuantizedLinear(
++        nn.Linear(128, 4, bias=True),
++        sample_size=64,
++        kmeans_iterations=1,
++    )
++    module.set_optim_enabled(radius=True, codebook=False)
++    assert module.radius_logits.requires_grad
++    assert not module.angle_logits.requires_grad
++    assert not module.bias.requires_grad
++    assert module.get_optim_params("radius") == [module.radius_logits]
+-- 
+2.34.1
+
