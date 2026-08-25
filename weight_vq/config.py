@@ -8,6 +8,8 @@ from pathlib import Path
 
 @dataclass(frozen=True)
 class TokenizerConfig:
+    """Tokenizer identity and local artifact."""
+
     name: str
     path: Path
     revision: str
@@ -15,6 +17,8 @@ class TokenizerConfig:
 
 @dataclass(frozen=True)
 class CalibrationConfig:
+    """Calibration dataset generation configuration."""
+
     tokenizer: TokenizerConfig
     dataset_cache: Path
     output: Path

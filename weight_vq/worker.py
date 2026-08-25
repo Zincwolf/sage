@@ -5,6 +5,7 @@ from __future__ import annotations
 import importlib
 import sys
 from collections.abc import Callable, Sequence
+from dataclasses import fields
 from typing import Any
 
 from jsonargparse import ArgumentParser
@@ -29,6 +30,13 @@ STAGES: dict[tuple[str, str], str] = {
     ("sphquant", "validate"): "weight_vq.sphquant.pipeline:validate",
 }
 
+CONFIG_TYPES = {
+    ("data", "calibration"): CalibrationConfig,
+    ("sphquant", "optimize"): SPHQuantConfig,
+    ("sphquant", "export"): SPHQuantConfig,
+    ("sphquant", "validate"): SPHQuantConfig,
+}
+
 
 def load_stage(specification: str) -> Stage:
     module_name, attribute = specification.split(":", maxsplit=1)
@@ -42,13 +50,7 @@ def parser(key: tuple[str, str]) -> ArgumentParser:
     cli.add_argument("method", choices=[key[0]])
     cli.add_argument("stage", choices=[key[1]])
     cli.add_argument("--config", action="config", required=True)
-    config_types = {
-        ("data", "calibration"): CalibrationConfig,
-        ("sphquant", "optimize"): SPHQuantConfig,
-        ("sphquant", "export"): SPHQuantConfig,
-        ("sphquant", "validate"): SPHQuantConfig,
-    }
-    cli.add_class_arguments(config_types.get(key, PendingPipelineConfig), "pipeline")
+    cli.add_class_arguments(CONFIG_TYPES.get(key, PendingPipelineConfig))
     return cli
 
 
@@ -60,7 +62,9 @@ def main(argv: Sequence[str] | None = None) -> None:
     key = (arguments[0], arguments[1])
     cli = parser(key)
     parsed = cli.instantiate(cli.parse_args(arguments))
-    load_stage(STAGES[key])(parsed.pipeline)
+    config_type = CONFIG_TYPES.get(key, PendingPipelineConfig)
+    config = config_type(**{field.name: parsed[field.name] for field in fields(config_type)})
+    load_stage(STAGES[key])(config)
 
 
 if __name__ == "__main__":

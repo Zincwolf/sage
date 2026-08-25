@@ -1,28 +1,27 @@
-pipeline:
-  # Original dense Hugging Face model and shared tokenized calibration artifact.
-  model: /path/to/Qwen3-4B-Instruct-2507
-  calibration: outputs/calibration/calibration.pt
+# Original dense Hugging Face model and shared tokenized calibration artifact.
+model: /path/to/Qwen3-4B-Instruct-2507
+calibration: outputs/calibration/calibration.pt
 
-  # optimize writes checkpoints/<model.name>; export reads it and writes exported_model.
-  # validate loads exported_model on one GPU and reports Linear weight statistics.
-  checkpoints: outputs/sphquant/layerwise
-  exported_model: outputs/sphquant/hf-layerwise
+# optimize writes checkpoints/<model.name>; export reads it and writes exported_model.
+# validate loads exported_model on one GPU and reports Linear weight statistics.
+checkpoints: outputs/sphquant/layerwise
+exported_model: outputs/sphquant/hf-layerwise
 
-  # Spherical codebook initialization.
-  sample_size: 65536
-  kmeans_iterations: 20
+# Spherical codebook initialization.
+sample_size: 65536
+kmeans_iterations: 20
 
-  # Layerwise radius/codebook recovery.
-  epochs: 20
-  learning_rate: 0.001
-  batch_size: 16
-  gradient_accumulation_steps: 1
-  cache_shards: 8
-  resume: true
-  checkpointing: true
+# Layerwise radius/codebook recovery.
+epochs: 20
+learning_rate: 0.001
+batch_size: 16
+gradient_accumulation_steps: 1
+cache_shards: 8
+resume: true
+checkpointing: true
 
-  # Reproducibility and smoke-run controls; null means no limit.
-  seed: 0
-  max_layers: null
-  calibration_limit: null
-  use_wandb: false
+# Reproducibility and smoke-run controls; null means no limit.
+seed: 0
+max_layers: null
+calibration_limit: null
+use_wandb: false

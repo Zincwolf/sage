@@ -29,12 +29,18 @@ def parser() -> argparse.ArgumentParser:
         method_parser = methods.add_parser(method)
         stage_parsers = method_parser.add_subparsers(dest="stage", required=True)
         for stage in METHOD_STAGES[method]:
-            stage_parser = stage_parsers.add_parser(stage)
-            stage_parser.add_argument("--config", type=Path, required=True)
+            # Stage options belong to the jsonargparse worker and must be forwarded
+            # verbatim so config values can be overridden from the command line.
+            stage_parsers.add_parser(stage, add_help=False)
     return cli
 
 
-def command(args: argparse.Namespace, *, root: Path | None = None) -> list[str]:
+def command(
+    args: argparse.Namespace,
+    worker_args: Sequence[str],
+    *,
+    root: Path | None = None,
+) -> list[str]:
     root = repository_root() if root is None else root
     project = root / "projects" / args.method
     return [
@@ -48,19 +54,23 @@ def command(args: argparse.Namespace, *, root: Path | None = None) -> list[str]:
         "weight_vq.worker",
         args.method,
         args.stage,
-        "--config",
-        str(args.config),
+        *worker_args,
     ]
 
 
 def main(argv: Sequence[str] | None = None) -> None:
-    args = parser().parse_args(argv)
+    arguments = list(sys.argv[1:] if argv is None else argv)
+    args, worker_args = parser().parse_known_args(arguments)
     environment = os.environ.copy()
     environment.pop("VIRTUAL_ENV", None)
     try:
-        completed = subprocess.run(command(args), check=False, env=environment)
+        completed = subprocess.run(
+            command(args, worker_args), check=False, env=environment
+        )
     except FileNotFoundError as error:
-        raise SystemExit(f"uv executable not found: {command(args)[0]}") from error
+        raise SystemExit(
+            f"uv executable not found: {command(args, worker_args)[0]}"
+        ) from error
     raise SystemExit(completed.returncode)
 
 
