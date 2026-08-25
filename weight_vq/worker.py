@@ -10,7 +10,7 @@ from typing import Any
 from jsonargparse import ArgumentParser
 
 from weight_vq.config import CalibrationConfig, PendingPipelineConfig
-from weight_vq.sphquant.config import SPHQuantOptimizeConfig
+from weight_vq.sphquant.config import SPHQuantConfig
 
 Stage = Callable[[Any], None]
 
@@ -44,7 +44,9 @@ def parser(key: tuple[str, str]) -> ArgumentParser:
     cli.add_argument("--config", action="config", required=True)
     config_types = {
         ("data", "calibration"): CalibrationConfig,
-        ("sphquant", "optimize"): SPHQuantOptimizeConfig,
+        ("sphquant", "optimize"): SPHQuantConfig,
+        ("sphquant", "export"): SPHQuantConfig,
+        ("sphquant", "validate"): SPHQuantConfig,
     }
     cli.add_class_arguments(config_types.get(key, PendingPipelineConfig), "pipeline")
     return cli
