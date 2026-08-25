@@ -3,22 +3,20 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import tempfile
 from pathlib import Path
 from typing import Any
 
 
-def sha256_file(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as file:
-        for chunk in iter(lambda: file.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
-
-
 def tensor_sha256(tensor: Any) -> str:
     return hashlib.sha256(tensor.contiguous().numpy().tobytes()).hexdigest()
+
+
+def tensor_inventory_sha256(inventory: dict[str, Any]) -> str:
+    payload = json.dumps(inventory, sort_keys=True, separators=(",", ":")).encode()
+    return hashlib.sha256(payload).hexdigest()
 
 
 def manifest_path(output: Path) -> Path:

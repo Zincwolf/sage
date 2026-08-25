@@ -10,9 +10,8 @@ from pathlib import Path
 from typing import Any
 
 from weight_vq import utils
-from weight_vq.config import CalibrationConfig
+from weight_vq.config import CalibrationConfig, CalibrationMetadata
 
-RECIPE = "qwen3-mixed-text-v1"
 DATASETS = {
     "wikitext2": {
         "name": "Salesforce/wikitext",
@@ -42,13 +41,17 @@ DATASETS = {
         "partition": "seeded shuffle, then 70% train / 10% validation / 20% test",
     },
 }
-TOKENIZER_FILES = (
-    "tokenizer.json",
-    "tokenizer_config.json",
-    "vocab.json",
-    "merges.txt",
-    "tokenizer.model",
-)
+
+
+def load_calibration_metadata(path: Path) -> CalibrationMetadata:
+    tensors = json.loads(utils.manifest_path(path).read_text())["tensors"]
+    train_shape = tensors["train"]["shape"]
+    validation_shape = tensors["validation"]["shape"]
+    return CalibrationMetadata(
+        train_samples=train_shape[0],
+        validation_samples=validation_shape[0],
+        sequence_length=train_shape[1],
+    )
 
 
 def _redpajama_split(dataset: Any, split: str) -> Any:
@@ -132,26 +135,6 @@ def _mixed_blocks(
     return blocks
 
 
-def _tokenizer_manifest(config: CalibrationConfig, tokenizer: Any) -> dict[str, Any]:
-    path = config.tokenizer.path
-    return {
-        "name": config.tokenizer.name,
-        "revision": config.tokenizer.revision,
-        "class": f"{type(tokenizer).__module__}.{type(tokenizer).__qualname__}",
-        "is_fast": bool(tokenizer.is_fast),
-        "vocab_size": int(tokenizer.vocab_size),
-        "special_token_ids": {
-            name: getattr(tokenizer, name)
-            for name in ("bos_token_id", "eos_token_id", "pad_token_id", "unk_token_id")
-        },
-        "files": {
-            name: utils.sha256_file(path / name)
-            for name in TOKENIZER_FILES
-            if (path / name).is_file()
-        },
-    }
-
-
 def main(config: CalibrationConfig) -> None:
     if not config.dataset_cache.is_dir():
         raise FileNotFoundError(f"dataset cache does not exist: {config.dataset_cache}")
@@ -197,50 +180,24 @@ def main(config: CalibrationConfig) -> None:
         ),
         dtype=torch.int64,
     ).contiguous()
-    train_hash = utils.tensor_sha256(train)
-    validation_hash = utils.tensor_sha256(validation)
-    utils.check_hash("train", train_hash, config.expected_train_sha256)
-    utils.check_hash("validation", validation_hash, config.expected_validation_sha256)
-
-    metadata = {
-        "recipe": RECIPE,
-        "seed": config.seed,
-        "train_samples": config.train_samples,
-        "validation_samples": config.validation_samples,
-        "sequence_length": config.sequence_length,
-    }
-    payload = {"train": train, "validation": validation, "metadata": metadata}
+    tensors = {"train": train, "validation": validation}
     manifest = {
-        "schema": "weight-vq-calibration-v1",
-        "recipe": RECIPE,
-        "datasets": DATASETS,
-        "tokenizer": _tokenizer_manifest(config, tokenizer),
-        "sampling": metadata
-        | {
-            "train_allocation": _allocation(config.train_samples),
-            "validation_allocation": _allocation(config.validation_samples),
-            "algorithm": "strip-filter-concatenate-fixed-blocks-then-seeded-shuffle",
-        },
         "tensors": {
-            "train": {
-                "shape": list(train.shape),
-                "dtype": str(train.dtype),
-                "sha256": train_hash,
-            },
-            "validation": {
-                "shape": list(validation.shape),
-                "dtype": str(validation.dtype),
-                "sha256": validation_hash,
-            },
-        },
-        "artifact": {"path": config.output.name, "sha256": None},
+            name: {
+                "dtype": str(tensor.dtype),
+                "shape": list(tensor.shape),
+                "sha256": utils.tensor_sha256(tensor),
+            }
+            for name, tensor in tensors.items()
+        }
     }
+    actual_sha256 = utils.tensor_inventory_sha256(manifest["tensors"])
+    utils.check_hash("calibration", actual_sha256, config.expected_sha256)
 
     output_temp = utils.temporary_path(config.output)
     manifest_temp = utils.temporary_path(manifest_path)
     try:
-        torch.save(payload, output_temp)
-        manifest["artifact"]["sha256"] = utils.sha256_file(output_temp)
+        torch.save(tensors, output_temp)
         manifest_temp.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n")
         os.replace(output_temp, config.output)
         os.replace(manifest_temp, manifest_path)

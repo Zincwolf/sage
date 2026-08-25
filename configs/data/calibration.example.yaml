@@ -9,6 +9,5 @@ pipeline:
   train_samples: 1920
   validation_samples: 128
   sequence_length: 2048
-  expected_train_sha256: null
-  expected_validation_sha256: null
+  expected_sha256: null
   force: false

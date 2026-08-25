@@ -1,4 +1,4 @@
-import hashlib
+import json
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -6,7 +6,7 @@ from types import SimpleNamespace
 import pytest
 
 from weight_vq import calibration, utils
-from weight_vq.config import CalibrationConfig, TokenizerConfig
+from weight_vq.config import CalibrationMetadata
 
 
 class CharacterTokenizer:
@@ -92,39 +92,47 @@ def test_manifest_path_is_derived_from_output() -> None:
     )
 
 
-def test_tokenizer_manifest_has_identity_without_local_path(tmp_path: Path) -> None:
-    (tmp_path / "tokenizer.json").write_bytes(b"tokenizer")
-    config = CalibrationConfig(
-        tokenizer=TokenizerConfig(
-            name="tests/tokenizer", path=tmp_path, revision="b" * 40
-        ),
-        dataset_cache=tmp_path,
-        output=tmp_path / "calibration.pt",
-        seed=0,
-        train_samples=3,
-        validation_samples=3,
-        sequence_length=2,
-    )
-    tokenizer = SimpleNamespace(
-        is_fast=True,
-        vocab_size=128,
-        bos_token_id=None,
-        eos_token_id=2,
-        pad_token_id=0,
-        unk_token_id=None,
+def test_load_calibration_metadata_from_manifest(tmp_path: Path) -> None:
+    artifact = tmp_path / "calibration.pt"
+    utils.manifest_path(artifact).write_text(
+        json.dumps(
+            {
+                "tensors": {
+                    "train": {
+                        "dtype": "torch.int64",
+                        "shape": [1920, 2048],
+                        "sha256": "a" * 64,
+                    },
+                    "validation": {
+                        "dtype": "torch.int64",
+                        "shape": [128, 2048],
+                        "sha256": "b" * 64,
+                    },
+                }
+            }
+        )
     )
 
-    identity = calibration._tokenizer_manifest(config, tokenizer)
+    assert calibration.load_calibration_metadata(artifact) == CalibrationMetadata(
+        train_samples=1920,
+        validation_samples=128,
+        sequence_length=2048,
+    )
 
-    assert identity["name"] == "tests/tokenizer"
-    assert str(tmp_path) not in str(identity)
-    assert identity["files"] == {
-        "tokenizer.json": hashlib.sha256(b"tokenizer").hexdigest()
-    }
+
+def test_tensor_inventory_hash_is_order_independent() -> None:
+    train = {"dtype": "torch.int64", "shape": [2, 3], "sha256": "a" * 64}
+    validation = {"dtype": "torch.int64", "shape": [1, 3], "sha256": "b" * 64}
+
+    assert utils.tensor_inventory_sha256(
+        {"train": train, "validation": validation}
+    ) == utils.tensor_inventory_sha256(
+        {"validation": validation, "train": train}
+    )
 
 
 def test_expected_hash_is_optional_but_enforced_when_present() -> None:
-    utils.check_hash("train", "abc", None)
-    utils.check_hash("train", "abc", "abc")
-    with pytest.raises(RuntimeError, match="train SHA-256 mismatch"):
-        utils.check_hash("train", "abc", "def")
+    utils.check_hash("calibration", "abc", None)
+    utils.check_hash("calibration", "abc", "abc")
+    with pytest.raises(RuntimeError, match="calibration SHA-256 mismatch"):
+        utils.check_hash("calibration", "abc", "def")

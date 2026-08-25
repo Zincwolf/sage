@@ -1,5 +1,23 @@
-# SPHQuant schema will be populated with the reference patch and adapter.
 pipeline:
-  model: /path/to/base-model
+  model: /path/to/Qwen3-4B-Instruct-2507
   calibration: outputs/calibration/calibration.pt
-  output: outputs/sphquant
+  # ParoQuant appends the model directory name to this path.
+  output: outputs/sphquant/layerwise
+
+  initialization:
+    sample_size: 65536
+    kmeans_iterations: 20
+
+  recovery:
+    epochs: 20
+    learning_rate: 0.001
+    batch_size: 16
+    gradient_accumulation_steps: 1
+    cache_shards: 8
+    resume: true
+    checkpointing: true
+
+  seed: 0
+  max_layers: null
+  calibration_limit: null
+  use_wandb: false

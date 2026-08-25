@@ -23,8 +23,14 @@ class CalibrationConfig:
     validation_samples: int
     sequence_length: int
     force: bool = False
-    expected_train_sha256: str | None = None
-    expected_validation_sha256: str | None = None
+    expected_sha256: str | None = None
+
+
+@dataclass(frozen=True)
+class CalibrationMetadata:
+    train_samples: int
+    validation_samples: int
+    sequence_length: int
 
 
 @dataclass(frozen=True)
