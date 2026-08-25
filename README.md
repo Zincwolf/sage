@@ -53,6 +53,7 @@ CUDA_HOME=/path/to/cuda-12.8 MAX_JOBS=8 uv sync --project projects/qtip --extra 
 
 ```sh
 cp configs/sphquant/qwen3.example.yaml configs/sphquant/qwen3.yaml
+# Please prepend `uv run` to `wvq` because it injects the env var "UV"
 uv run wvq sphquant optimize --config configs/sphquant/qwen3.yaml
 ```
 

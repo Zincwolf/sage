@@ -1,0 +1,12 @@
+pipeline:
+  dataset:
+    name: allenai/c4
+    revision: null
+    split: train
+  tokenizer:
+    model: /path/to/base-model
+  output: outputs/calibration/calibration.pt
+  manifest: outputs/calibration/manifest.json
+  seed: 0
+  samples: 2048
+  sequence_length: 2048

@@ -1,0 +1,5 @@
+# QTIP schema will be populated when the verified adapter is migrated.
+pipeline:
+  model: /path/to/base-model
+  calibration: outputs/calibration/calibration.pt
+  output: outputs/qtip

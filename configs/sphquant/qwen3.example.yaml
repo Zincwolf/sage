@@ -1,0 +1,5 @@
+# SPHQuant schema will be populated with the reference patch and adapter.
+pipeline:
+  model: /path/to/base-model
+  calibration: outputs/calibration/calibration.pt
+  output: outputs/sphquant
