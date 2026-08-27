@@ -1,3 +1,4 @@
+import csv
 import sys
 from contextlib import nullcontext
 from pathlib import Path
@@ -153,8 +154,10 @@ def test_validate_loads_on_gpu_and_prints_linear_statistics(
     fake_torch.nn = SimpleNamespace(Linear=FakeLinear)  # type: ignore[attr-defined]
     fake_torch.isfinite = lambda _value: SimpleNamespace(all=lambda: True)  # type: ignore[attr-defined]
     fake_torch.no_grad = nullcontext  # type: ignore[attr-defined]
-    fake_torch.tensor = lambda *_args, **_kwargs: object()  # type: ignore[attr-defined]
-    fake_torch.quantile = lambda _sample, values: [FakeScalar(0.0)] * 5  # type: ignore[attr-defined]
+    fake_torch.tensor = lambda values, **_kwargs: values  # type: ignore[attr-defined]
+    fake_torch.quantile = lambda _sample, values: [  # type: ignore[attr-defined]
+        FakeScalar(value) for value in values
+    ]
     fake_transformers = ModuleType("transformers")
     fake_transformers.AutoModelForCausalLM = AutoModel  # type: ignore[attr-defined]
     monkeypatch.setitem(sys.modules, "torch", fake_torch)
@@ -164,6 +167,16 @@ def test_validate_loads_on_gpu_and_prints_linear_statistics(
 
     assert loads[0][0] == Path("outputs/sphquant/hf-one-layer")
     assert loads[0][1]["device_map"] == 0
-    output = capsys.readouterr().out
-    assert "abs_p999" in output
-    assert "proj\t4\t4" in output
+    rows = list(csv.reader(capsys.readouterr().out.splitlines()))
+    assert rows == [
+        ["layer", "p01", "p50", "p99", "abs_p99", "abs_p999", "abs_max"],
+        [
+            "proj",
+            "1.00000e-02",
+            "5.00000e-01",
+            "9.90000e-01",
+            "9.90000e-01",
+            "9.99000e-01",
+            "2.00000e+00",
+        ],
+    ]

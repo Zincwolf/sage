@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import csv
 import sys
 
 from weight_vq.calibration import load_calibration_metadata
@@ -110,10 +111,8 @@ def validate(config: SPHQuantConfig) -> None:
         if not torch.isfinite(parameter).all():
             raise ValueError(f"Non-finite parameter in exported model: {name}")
 
-    print(
-        "name\tnumel\tsampled\tmean\tstd\tmin\tp01\tp05\tp50\tp95\tp99\tmax"
-        "\tabs_p95\tabs_p99\tabs_p999\tabs_max"
-    )
+    writer = csv.writer(sys.stdout, lineterminator="\n")
+    writer.writerow(("layer", "p01", "p50", "p99", "abs_p99", "abs_p999", "abs_max"))
     with torch.no_grad():
         for name, module in model.named_modules():
             if not isinstance(module, torch.nn.Linear):
@@ -123,22 +122,17 @@ def validate(config: SPHQuantConfig) -> None:
             sample = weight[::stride]
             quantiles = torch.quantile(
                 sample,
-                torch.tensor([0.01, 0.05, 0.5, 0.95, 0.99], device=sample.device),
+                torch.tensor([0.01, 0.5, 0.99], device=sample.device),
             )
             abs_quantiles = torch.quantile(
                 sample.abs(),
-                torch.tensor([0.95, 0.99, 0.999], device=sample.device),
+                torch.tensor([0.99, 0.999], device=sample.device),
             )
-            print(
-                name,
-                weight.numel(),
-                sample.numel(),
-                weight.mean().item(),
-                weight.std().item(),
-                weight.min().item(),
-                *(value.item() for value in quantiles),
-                weight.max().item(),
-                *(value.item() for value in abs_quantiles),
-                weight.abs().max().item(),
-                sep="\t",
+            writer.writerow(
+                (
+                    name,
+                    *(f"{value.item():.5e}" for value in quantiles),
+                    *(f"{value.item():.5e}" for value in abs_quantiles),
+                    f"{weight.abs().max().item():.5e}",
+                )
             )
