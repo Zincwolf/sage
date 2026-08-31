@@ -1,7 +1,7 @@
-From eb111a6b53743fad64cd7bc72a4252d347a90ca7 Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Zincwolf <zincwolf@outlook.com>
 Date: Fri, 21 Aug 2026 17:17:36 +0800
-Subject: [PATCH 1/5] Add SPHQuant optimization path
+Subject: [PATCH] Add SPHQuant optimization path
 
 ---
  experiments/sphquant/export_qwen3_4b.sh |  43 +++
@@ -1941,6 +1941,3 @@ index 0000000..f219ea7
 +    assert not module.angle_logits.requires_grad
 +    assert not module.bias.requires_grad
 +    assert module.get_optim_params("radius") == [module.radius_logits]
--- 
-2.34.1
-

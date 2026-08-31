@@ -1,7 +1,7 @@
-From 0e6d358548093b4a5dd01e5baf8f692faf725baf Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Zincwolf <zincwolf@outlook.com>
 Date: Fri, 21 Aug 2026 17:36:36 +0800
-Subject: [PATCH 2/5] Remove SPHQuant protocol enforcement
+Subject: [PATCH] Remove SPHQuant protocol enforcement
 
 ---
  paroquant/cli/optimize.py | 21 ---------------------
@@ -39,6 +39,3 @@ index 6c27782..97c026c 100644
      # Store the results in a subdirectory.
      model_name = args.model.split("/")[-1]
      output_dir = Path(args.output_dir)
--- 
-2.34.1
-

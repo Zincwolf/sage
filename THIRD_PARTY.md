@@ -27,9 +27,12 @@ git submodule update --init third_party/paroquant
 cd third_party/paroquant
 git switch -c wvq/paroquant f74a96c306f7db3938e758d7dbc945d450f9f23f
 # edit, test, and create one or more commits
-git format-patch --output-directory ../../patches/paroquant \
+git format-patch --no-numbered --zero-commit --no-signature \
+  --output-directory ../../patches/paroquant \
   f74a96c306f7db3938e758d7dbc945d450f9f23f..HEAD
 ```
+
+导出任何 patch series 时一律使用 `--no-numbered --zero-commit --no-signature`。`--no-numbered` 固定 `Subject:` 为 `[PATCH]`，避免 series 中提交数量变化时将所有既有补丁改成新的 `[PATCH n/m]`；它不会移除输出文件名中的 `0001-` 等序号。`--zero-commit` 将首行 `From` 中的本地 commit ID 统一写成全零，避免补丁经 `git am` 重建后因 committer 信息和 parent commit 改变而产生无关差异。`--no-signature` 省略末尾的 Git 版本，避免开发机升级 Git 时改动所有补丁。
 
 重建 patch series 前先删除该目录中的旧 `.patch`，避免已删除或重命名的提交残留。生成后必须在另一个从固定 base 创建的临时 branch/worktree 中顺序执行 `git am patches/*.patch`，确认可以无冲突恢复；同时检查最终 tree，而非要求 commit ID 相同，因为 `git am` 会记录新的 committer 信息。父仓库只提交更新后的 patch 文件。
 

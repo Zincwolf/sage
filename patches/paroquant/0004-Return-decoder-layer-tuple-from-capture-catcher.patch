@@ -1,7 +1,7 @@
-From 5d9401d968eb6502d7dc55a374fba6988c1b90b7 Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Zincwolf <zincwolf@outlook.com>
 Date: Fri, 21 Aug 2026 18:03:31 +0800
-Subject: [PATCH 4/5] Return decoder layer tuple from capture catcher
+Subject: [PATCH] Return decoder layer tuple from capture catcher
 
 ---
  paroquant/optim/util.py | 4 +++-
@@ -22,6 +22,3 @@ index 8b65576..14eb71f 100644
  
          def __getattr__(self, name):
              return getattr(self.module, name)
--- 
-2.34.1
-

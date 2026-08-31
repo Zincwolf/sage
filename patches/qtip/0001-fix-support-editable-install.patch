@@ -1,0 +1,39 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Zincwolf <zincwolf@outlook.com>
+Date: Mon, 31 Aug 2026 13:21:28 +0800
+Subject: [PATCH] fix: support editable install
+
+---
+ .gitignore     |  2 ++
+ pyproject.toml | 11 +++++++++++
+ 2 files changed, 13 insertions(+)
+ create mode 100644 pyproject.toml
+
+diff --git a/.gitignore b/.gitignore
+index 8ea10fc..d7f3ccb 100644
+--- a/.gitignore
++++ b/.gitignore
+@@ -14,3 +14,5 @@ fast-hadamard-transform/build/
+ fast-hadamard-transform/dist/
+ report*.nsys-rep
+ report*.sqlite
++
++*.egg-info
+\ No newline at end of file
+diff --git a/pyproject.toml b/pyproject.toml
+new file mode 100644
+index 0000000..e067097
+--- /dev/null
++++ b/pyproject.toml
+@@ -0,0 +1,11 @@
++[project]
++name = "qtip"
++version = "0.0.0"
++requires-python = ">=3.11"
++
++[build-system]
++requires = ["setuptools>=69.5.1"]
++build-backend = "setuptools.build_meta"
++
++[tool.setuptools]
++packages = ["lib", "lib.algo", "lib.codebook", "lib.linear", "lib.utils"]

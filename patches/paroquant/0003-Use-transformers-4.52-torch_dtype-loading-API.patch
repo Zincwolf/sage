@@ -1,7 +1,7 @@
-From 42af9c58714afd954fe738332cea140e07c9b95c Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Zincwolf <zincwolf@outlook.com>
 Date: Fri, 21 Aug 2026 17:59:31 +0800
-Subject: [PATCH 3/5] Use transformers 4.52 torch_dtype loading API
+Subject: [PATCH] Use transformers 4.52 torch_dtype loading API
 
 ---
  paroquant/optim/util.py | 4 +++-
@@ -22,6 +22,3 @@ index b5ac9a0..8b65576 100644
      try:
          return AutoModelForImageTextToText.from_pretrained(model_path, **common)
      except (ValueError, KeyError):
--- 
-2.34.1
-
