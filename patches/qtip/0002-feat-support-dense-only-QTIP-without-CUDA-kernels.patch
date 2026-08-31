@@ -1,0 +1,135 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Zincwolf <zincwolf@outlook.com>
+Date: Mon, 31 Aug 2026 14:44:26 +0800
+Subject: [PATCH] feat: support dense-only QTIP without CUDA kernels
+
+---
+ lib/codebook/__init__.py  | 13 +++++--
+ lib/utils/kernel_check.py |  4 +++
+ tests/test_dense_only.py  | 74 +++++++++++++++++++++++++++++++++++++++
+ 3 files changed, 89 insertions(+), 2 deletions(-)
+ create mode 100644 tests/test_dense_only.py
+
+diff --git a/lib/codebook/__init__.py b/lib/codebook/__init__.py
+index 106fc80..68f587d 100644
+--- a/lib/codebook/__init__.py
++++ b/lib/codebook/__init__.py
+@@ -1,6 +1,15 @@
+-import qtip_kernels
+ import torch
+ 
++try:
++    import qtip_kernels
++except ModuleNotFoundError as error:
++    if error.name != "qtip_kernels":
++        raise
++    # Packed CUDA inference is optional for LDLQ and dense-QDQ export.
++    qtip_kernels = None
++
++HAS_QTIP_KERNELS = qtip_kernels is not None
++
+ kernels = [
+     (1024, 1, 3072, 4),
+     (8192, 1, 3072, 4),
+@@ -67,7 +76,7 @@ kernels = [
+ 
+ kdict = {}
+ 
+-for m, n, k, bitrate in kernels:
++for m, n, k, bitrate in kernels if HAS_QTIP_KERNELS else ():
+     torch.library.define(
+         f"quip_lib::decompress_matvec_qtip_{m}_{n}_{k}_{bitrate}",
+         "(Tensor compressed, Tensor x, Tensor codebook) -> Tensor")
+diff --git a/lib/utils/kernel_check.py b/lib/utils/kernel_check.py
+index c739440..7a9c4de 100644
+--- a/lib/utils/kernel_check.py
++++ b/lib/utils/kernel_check.py
+@@ -1,4 +1,8 @@
+ def has_kernel(decode_mode, L, K, V, tlut_bits, td_x, td_y):
++    from lib.codebook import HAS_QTIP_KERNELS
++
++    if not HAS_QTIP_KERNELS:
++        return False
+     if decode_mode != 'quantlut_sym':
+         return False
+     if L != 16:
+diff --git a/tests/test_dense_only.py b/tests/test_dense_only.py
+new file mode 100644
+index 0000000..c546dd4
+--- /dev/null
++++ b/tests/test_dense_only.py
+@@ -0,0 +1,74 @@
++import torch
++
++
++def test_codebook_imports_without_packed_cuda_kernels():
++    from lib.codebook import HAS_QTIP_KERNELS
++    from lib.codebook.bitshift import bitshift_codebook
++    from lib.utils.kernel_check import has_kernel
++
++    assert not HAS_QTIP_KERNELS
++    assert not has_kernel("quantlut_sym", 16, 2, 2, 9, 16, 16)
++
++    tlut = torch.randn(1 << 3, 2)
++    codebook = bitshift_codebook(
++        L=4,
++        K=1,
++        V=2,
++        tlut_bits=3,
++        decode_mode="quantlut_sym",
++        tlut=tlut,
++    )
++    values = torch.randn(4, 4)
++    reconstructed, trellis = codebook.quantize(values)
++
++    assert reconstructed.shape == values.shape
++    assert trellis.shape == (4, 2)
++    assert torch.isfinite(reconstructed).all()
++
++
++def test_dense_trellis_roundtrip_without_packed_cuda_kernels():
++    from lib.codebook.bitshift import bitshift_codebook
++
++    codebook = bitshift_codebook(
++        L=4,
++        K=1,
++        V=2,
++        tlut_bits=3,
++        decode_mode="quantlut_sym",
++        tlut=torch.randn(1 << 3, 2),
++    )
++    _, trellis = codebook.quantize(torch.randn(4, 4))
++    packed = codebook.pack_trellis(trellis)
++    unpacked = codebook.unpack_trellis(packed, T=4)
++
++    torch.testing.assert_close(unpacked, trellis)
++
++
++def test_ldlq_runs_without_packed_cuda_kernels():
++    from types import SimpleNamespace
++
++    from lib.algo.ldlq import LDLQ
++    from lib.codebook.bitshift import bitshift_codebook
++
++    codebook = bitshift_codebook(
++        L=4,
++        K=1,
++        V=2,
++        tlut_bits=3,
++        decode_mode="quantlut_sym",
++        tlut=torch.randn(1 << 3, 2),
++    )
++    weight = torch.randn(4, 4)
++    factor = torch.zeros(4, 4)
++    reconstructed, trellis = LDLQ(
++        weight,
++        factor,
++        codebook,
++        SimpleNamespace(td_x=2, td_y=2, V=2),
++        buf_cols=2,
++        for_kernel=False,
++    )
++
++    assert reconstructed.shape == weight.shape
++    assert trellis.shape == (4, 2)
++    assert torch.isfinite(reconstructed).all()
