@@ -1,0 +1,244 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Zincwolf <zincwolf@outlook.com>
+Date: Mon, 31 Aug 2026 16:55:01 +0800
+Subject: [PATCH] feat: decode Qwen3 VL trellises to dense weights
+
+---
+ lib/qwen3_vl/common.py        | 106 ++++++++++++++++++++++++++++++++++
+ tests/test_qwen3_vl_common.py |  50 +++++++++++++++-
+ 2 files changed, 153 insertions(+), 3 deletions(-)
+
+diff --git a/lib/qwen3_vl/common.py b/lib/qwen3_vl/common.py
+index d234258..25d9295 100644
+--- a/lib/qwen3_vl/common.py
++++ b/lib/qwen3_vl/common.py
+@@ -2,9 +2,11 @@
+ 
+ from __future__ import annotations
+ 
++import os
+ from operator import attrgetter
+ from pathlib import Path
+ 
++import torch
+ from torch import nn
+ 
+ EXPECTED_LAYERS = 36
+@@ -50,6 +52,30 @@ def layer_complete(
+     )
+ 
+ 
++def atomic_write_completion(
++    layer_index: int,
++    checkpoint_dir: str | Path,
++) -> None:
++    checkpoint_dir = Path(checkpoint_dir)
++    missing = [
++        path
++        for path in projection_paths(layer_index, checkpoint_dir)
++        if not path.is_file()
++    ]
++    if missing:
++        raise RuntimeError(
++            f"layer {layer_index} is missing QTIP checkpoints: {missing}"
++        )
++    marker = checkpoint_dir / f"{layer_index}.complete"
++    marker.parent.mkdir(parents=True, exist_ok=True)
++    temporary = marker.with_name(f".{marker.name}.tmp-{os.getpid()}")
++    try:
++        temporary.write_text("complete\n")
++        os.replace(temporary, marker)
++    finally:
++        temporary.unlink(missing_ok=True)
++
++
+ def hessian_complete(
+     layer_index: int,
+     hessian_dir: str | Path,
+@@ -177,6 +203,83 @@ def projection_state_key(layer_index: int, projection: str) -> str:
+     )
+ 
+ 
++def reconstruct_dense_weight(
++    saved: dict,
++    config: dict,
++) -> torch.Tensor:
++    """Decode one native bitshift checkpoint into its dense QDQ weight."""
++    from lib.codebook.bitshift import bitshift_codebook
++    from lib.utils.matmul_had import matmul_hadU
++
++    if int(saved.get("rcp", 0)) != 0:
++        raise NotImplementedError(
++            "dense Qwen3-VL export does not use TP packing"
++        )
++    quant = config.get("quantization", config)
++    su = saved["SU"].float()
++    sv = saved["SV"].float() * saved["Wscale"].float()
++    out_features, in_features = len(sv), len(su)
++    cb = bitshift_codebook(
++        L=quant["L"],
++        K=quant["K"],
++        V=quant["V"],
++        tlut_bits=quant["tlut_bits"],
++        decode_mode=quant["decode_mode"],
++        tlut=saved.get("tlut"),
++    )
++    trellis = cb.unpack_trellis(
++        saved["trellis"], quant["td_x"] * quant["td_y"]
++    )
++    raw = cb.recons(trellis).transpose(0, 1).transpose(1, 2).reshape(
++        out_features // quant["td_x"],
++        in_features // quant["td_y"],
++        quant["td_x"],
++        quant["td_y"],
++    ).transpose(1, 2).reshape(out_features, in_features)
++    transformed = matmul_hadU(matmul_hadU(raw.float() / 32).T).T
++    return ((transformed * su) * (sv * 32).unsqueeze(1)).contiguous()
++
++
++def inject_dense_checkpoints(
++    model: nn.Module,
++    checkpoint_dir: str | Path,
++    config: dict,
++    *,
++    layer_start: int,
++    layer_end: int,
++    reconstruct=None,
++) -> list[str]:
++    checkpoint_dir = Path(checkpoint_dir)
++    layers = get_layers(model)
++    if reconstruct is None:
++        reconstruct = reconstruct_dense_weight
++    modified = []
++    with torch.no_grad():
++        for layer_index in range(layer_start, layer_end):
++            if not layer_complete(layer_index, checkpoint_dir):
++                raise RuntimeError(
++                    f"QTIP layer {layer_index} is not complete"
++                )
++            layer = layers[layer_index]
++            for attribute, short, _, _ in PROJECTIONS:
++                path = checkpoint_dir / f"{layer_index}_{short}.pt"
++                saved = torch.load(
++                    path, map_location="cpu", weights_only=True
++                )
++                dense = reconstruct(saved, config)
++                linear = attrgetter(attribute)(layer)
++                if tuple(dense.shape) != tuple(linear.weight.shape):
++                    raise RuntimeError(
++                        f"{path.name}: {tuple(dense.shape)} != "
++                        f"{tuple(linear.weight.shape)}"
++                    )
++                linear.weight.copy_(dense.to(linear.weight.dtype))
++                modified.append(
++                    projection_state_key(layer_index, attribute)
++                )
++    return modified
++
++
+ def freeze_non_qtip_parameters(layer: nn.Module) -> None:
+     for parameter in layer.parameters():
+         parameter.requires_grad_(False)
+@@ -186,13 +289,16 @@ __all__ = [
+     "EXPECTED_LAYERS",
+     "HESSIAN_NAMES",
+     "PROJECTIONS",
++    "atomic_write_completion",
+     "audit_qwen3_vl",
+     "freeze_non_qtip_parameters",
+     "get_language_model",
+     "get_layers",
+     "hessian_complete",
++    "inject_dense_checkpoints",
+     "layer_complete",
+     "projection_paths",
+     "projection_state_key",
+     "quant_order",
++    "reconstruct_dense_weight",
+ ]
+diff --git a/tests/test_qwen3_vl_common.py b/tests/test_qwen3_vl_common.py
+index 64a3782..630ff53 100644
+--- a/tests/test_qwen3_vl_common.py
++++ b/tests/test_qwen3_vl_common.py
+@@ -1,20 +1,22 @@
+ from pathlib import Path
+ from types import SimpleNamespace
+ 
++import pytest
+ import torch
+-from torch import nn
+-
+ from lib.qwen3_vl.common import (
+     HESSIAN_NAMES,
+     PROJECTIONS,
++    atomic_write_completion,
+     audit_qwen3_vl,
+     get_layers,
+     hessian_complete,
++    inject_dense_checkpoints,
+     layer_complete,
+     projection_paths,
+     projection_state_key,
+     quant_order,
+ )
++from torch import nn
+ 
+ 
+ class TinyAttention(nn.Module):
+@@ -115,13 +117,55 @@ def test_flat_checkpoint_names_require_marker_and_all_projections():
+             path.touch()
+         assert not layer_complete(4, checkpoint_dir)
+ 
+-        (checkpoint_dir / "4.complete").write_text("complete\n")
++        atomic_write_completion(4, checkpoint_dir)
+         assert layer_complete(4, checkpoint_dir)
+ 
+         expected[0].unlink()
+         assert not layer_complete(4, checkpoint_dir)
+ 
+ 
++def test_completion_marker_requires_all_projection_checkpoints():
++    from tempfile import TemporaryDirectory
++
++    with TemporaryDirectory() as directory:
++        checkpoint_dir = Path(directory)
++        with pytest.raises(RuntimeError, match="missing QTIP checkpoints"):
++            atomic_write_completion(0, checkpoint_dir)
++        assert not (checkpoint_dir / "0.complete").exists()
++
++
++def test_dense_injection_targets_all_seven_projections():
++    from tempfile import TemporaryDirectory
++
++    model = TinyQwen3VL(1)
++    with TemporaryDirectory() as directory:
++        checkpoint_dir = Path(directory)
++        for _, short, _, _ in PROJECTIONS:
++            torch.save(
++                {"dense": torch.full((16, 16), 0.25)},
++                checkpoint_dir / f"0_{short}.pt",
++            )
++        atomic_write_completion(0, checkpoint_dir)
++        modified = inject_dense_checkpoints(
++            model,
++            checkpoint_dir,
++            {},
++            layer_start=0,
++            layer_end=1,
++            reconstruct=lambda saved, _config: saved["dense"],
++        )
++
++    assert len(modified) == 7
++    for attribute, _, _, _ in PROJECTIONS:
++        module = model.model.language_model.layers[0]
++        for component in attribute.split("."):
++            module = getattr(module, component)
++        torch.testing.assert_close(
++            module.weight,
++            torch.full_like(module.weight, 0.25),
++        )
++
++
+ def test_flat_hessian_names_are_layer_scoped():
+     from tempfile import TemporaryDirectory
+ 

@@ -1,0 +1,801 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Zincwolf <zincwolf@outlook.com>
+Date: Mon, 31 Aug 2026 15:39:46 +0800
+Subject: [PATCH] feat: replay Qwen3 VL layers for reconstruction
+
+---
+ lib/algo/finetune.py          |  95 ++++++--
+ lib/qwen3_vl/common.py        |   6 +
+ lib/qwen3_vl/replay.py        | 413 ++++++++++++++++++++++++++++++++++
+ tests/test_qwen3_vl_replay.py | 180 +++++++++++++++
+ 4 files changed, 675 insertions(+), 19 deletions(-)
+ create mode 100644 lib/qwen3_vl/replay.py
+ create mode 100644 tests/test_qwen3_vl_replay.py
+
+diff --git a/lib/algo/finetune.py b/lib/algo/finetune.py
+index 5847eb3..5245c99 100644
+--- a/lib/algo/finetune.py
++++ b/lib/algo/finetune.py
+@@ -27,43 +27,72 @@ def use_tf32():
+ 
+ 
+ def finetune_decoder_layer(layer, name, device, train_dl, valid_dl, orig_dtype,
+-                           args):
++                           args, reconstruction_adapter=None):
+     with use_tf32():
+         layer = layer.to(device)
+ 
+-        source = next(iter(train_dl))[0]
+-        position_ids = torch.arange(source.shape[1], device=device).unsqueeze(0)
+-        # manifest tensor parallel attributes in layer
+-        output = layer(source.to(device),
+-                       position_ids=position_ids)[0]
++        if reconstruction_adapter is None:
++            source = next(iter(train_dl))[0]
++            position_ids = torch.arange(
++                source.shape[1], device=device).unsqueeze(0)
++            # manifest tensor parallel attributes in layer
++            layer(source.to(device), position_ids=position_ids)[0]
++        else:
++            reconstruction_adapter.materialize(layer, device)
+         
+         best_sd = {k: v.cpu() for k, v in layer.state_dict().items()}
+         utils.clean()
+ 
+         optim = torch.optim.Adam(layer.parameters(), lr=args.ft_lr)
+-        best_loss = utils.calculate_mse_loss(layer, valid_dl, device)
++        if reconstruction_adapter is None:
++            best_loss = utils.calculate_mse_loss(layer, valid_dl, device)
++        else:
++            best_loss = reconstruction_adapter.validation_loss(layer, device)
+         glog.info(f'layer {name} initial loss {best_loss}')
+         scaler = torch.cuda.amp.GradScaler(enabled=(orig_dtype==torch.float16))
+         worse_ct = 0
+ 
+         for epoch in range(args.ft_epochs):
+-            for bidx, (source, targets) in enumerate(train_dl):
+-                targets = targets.to(device, non_blocking=True)
++            train_batches = (
++                train_dl
++                if reconstruction_adapter is None
++                else reconstruction_adapter.iter_train(epoch)
++            )
++            num_train_batches = (
++                len(train_dl)
++                if reconstruction_adapter is None
++                else len(reconstruction_adapter.train)
++            )
++            for bidx, batch in enumerate(train_batches):
+                 with torch.autocast(device_type='cuda',
+                                     dtype=orig_dtype,
+                                     enabled=True):
+-                    output = layer(source.to(device),
+-                                   position_ids=position_ids)[0]
+-                    loss = nn.MSELoss()(output, targets)
++                    if reconstruction_adapter is None:
++                        source, targets = batch
++                        targets = targets.to(device, non_blocking=True)
++                        output = layer(
++                            source.to(device),
++                            position_ids=position_ids,
++                        )[0]
++                        loss = nn.MSELoss()(output, targets)
++                    else:
++                        loss = reconstruction_adapter.loss(
++                            layer, batch, device)
+                 scaler.scale(loss).backward()
+-                if bidx % args.ft_update_freq == args.ft_update_freq - 1 or bidx == len(
+-                        train_dl) - 1:
++                if (bidx % args.ft_update_freq ==
++                        args.ft_update_freq - 1 or
++                        bidx == num_train_batches - 1):
+                     scaler.step(optim)
+                     scaler.update()
+                     optim.zero_grad()
+ 
+             if epoch % args.ft_valid_freq == (args.ft_valid_freq - 1):
+-                test_loss = utils.calculate_mse_loss(layer, valid_dl, device)
++                if reconstruction_adapter is None:
++                    test_loss = utils.calculate_mse_loss(
++                        layer, valid_dl, device)
++                else:
++                    test_loss = reconstruction_adapter.validation_loss(
++                        layer, device)
+                 if test_loss < best_loss:
+                     glog.info(
+                         f'layer {name} @ epoch {epoch} new loss {test_loss} old loss {best_loss} BETTER'
+@@ -88,7 +117,8 @@ def finetune_decoder_layer(layer, name, device, train_dl, valid_dl, orig_dtype,
+ 
+ 
+ def quantize_finetune_decoder_layer(mixed_layer, quant_order, idx, cb, args,
+-                                    device, pre_orig_emb, orig_emb):
++                                    device, pre_orig_emb, orig_emb,
++                                    reconstruction_adapter=None):
+     torch.manual_seed(idx)
+     torch.set_num_threads(args.num_cpu_threads)
+     torch.set_grad_enabled(False)
+@@ -100,7 +130,14 @@ def quantize_finetune_decoder_layer(mixed_layer, quant_order, idx, cb, args,
+         break
+     mixed_layer = mixed_layer.float()
+ 
+-    train_dl, valid_dl = utils.split_data(pre_orig_emb, orig_emb, args)
++    if args.ft_epochs > 0:
++        if reconstruction_adapter is None:
++            train_dl, valid_dl = utils.split_data(
++                pre_orig_emb, orig_emb, args)
++        else:
++            train_dl = valid_dl = None
++    else:
++        train_dl = valid_dl = None
+ 
+     has_kernel = utils.has_kernel(args.decode_mode, args.L, args.K, args.V,
+                                   args.tlut_bits, args.td_x, args.td_y)
+@@ -259,6 +296,12 @@ def quantize_finetune_decoder_layer(mixed_layer, quant_order, idx, cb, args,
+ 
+         del HRr, Wr, hatWr, LRr, Qidxs
+         utils.clean()
++
++        if args.ft_epochs == 0:
++            del packed, SU, SV, Wscale
++            cb = cb.cpu()
++            utils.clean()
++            continue
+         
+         q_linear = QuantizedLinear(
+             n,
+@@ -310,12 +353,26 @@ def quantize_finetune_decoder_layer(mixed_layer, quant_order, idx, cb, args,
+             q_linear)
+ 
+         with torch.enable_grad():
+-            finetune_decoder_layer(mixed_layer, f'{idx}_{name}', device,
+-                                   train_dl, valid_dl, orig_dtype, args)
++            finetune_decoder_layer(
++                mixed_layer,
++                f'{idx}_{name}',
++                device,
++                train_dl,
++                valid_dl,
++                orig_dtype,
++                args,
++                reconstruction_adapter,
++            )
+ 
+         cb = cb.cpu()
+         utils.clean()
+ 
++    if args.ft_epochs == 0:
++        mixed_layer = mixed_layer.to(orig_dtype).cpu()
++        utils.clean()
++        torch.set_grad_enabled(False)
++        return
++
+     for quant_i, (linear_attr, name, in_hess_name, out_hess_name,
+                   rcp) in enumerate(quant_order):
+         quant_linear = attrgetter(linear_attr)(mixed_layer)
+diff --git a/lib/qwen3_vl/common.py b/lib/qwen3_vl/common.py
+index f20949d..d234258 100644
+--- a/lib/qwen3_vl/common.py
++++ b/lib/qwen3_vl/common.py
+@@ -177,11 +177,17 @@ def projection_state_key(layer_index: int, projection: str) -> str:
+     )
+ 
+ 
++def freeze_non_qtip_parameters(layer: nn.Module) -> None:
++    for parameter in layer.parameters():
++        parameter.requires_grad_(False)
++
++
+ __all__ = [
+     "EXPECTED_LAYERS",
+     "HESSIAN_NAMES",
+     "PROJECTIONS",
+     "audit_qwen3_vl",
++    "freeze_non_qtip_parameters",
+     "get_language_model",
+     "get_layers",
+     "hessian_complete",
+diff --git a/lib/qwen3_vl/replay.py b/lib/qwen3_vl/replay.py
+new file mode 100644
+index 0000000..0670931
+--- /dev/null
++++ b/lib/qwen3_vl/replay.py
+@@ -0,0 +1,413 @@
++"""Multimodal capture, replay, and reconstruction batches for QTIP."""
++
++from __future__ import annotations
++
++from contextlib import nullcontext
++from copy import deepcopy
++from dataclasses import dataclass
++from pathlib import Path
++
++import torch
++from torch import nn
++
++from paroquant.optim.multimodal import (
++    CocoCalibrationBatches,
++    apply_deepstack_context,
++)
++from paroquant.optim.util import (
++    RETAINED_KWARG_KEYS,
++    capture_layer_inputs_and_args,
++    to_device,
++)
++
++from .hessian import LayerHessianCollectors
++
++
++@dataclass
++class CapturedSplit:
++    first_layer_inputs: list[torch.Tensor]
++    kwargs_by_layer: list[list[dict]]
++    other_args_by_layer: list[list[tuple[torch.Tensor, ...]]]
++    retained_kwargs: list[dict]
++    deepstack_contexts: list[dict]
++    valid_masks: list[torch.Tensor]
++    sample_ids: list[str]
++
++    @property
++    def sample_count(self) -> int:
++        return sum(mask.shape[0] for mask in self.valid_masks)
++
++
++class _RecordingCalibration:
++    def __init__(self, source: CocoCalibrationBatches) -> None:
++        self.source = source
++        self.valid_masks: list[torch.Tensor] = []
++
++    def __iter__(self):
++        if self.valid_masks:
++            raise RuntimeError("Calibration recorder may only be consumed once")
++        for batch in self.source:
++            if "attention_mask" not in batch:
++                raise KeyError("Processor batch has no attention_mask")
++            self.valid_masks.append(
++                batch["attention_mask"].detach().cpu().to(torch.bool)
++            )
++            yield batch
++
++
++def capture_split(
++    model: nn.Module,
++    layers: nn.ModuleList,
++    *,
++    manifest_path: str | Path,
++    model_path: str | Path,
++    split: str,
++    sample_count: int,
++    batch_size: int,
++    device: torch.device | str,
++) -> CapturedSplit:
++    if sample_count <= 0:
++        raise ValueError("sample_count must be positive")
++    source = CocoCalibrationBatches(
++        manifest_path,
++        model_path=model_path,
++        split=split,
++        batch_size=batch_size,
++        limit=sample_count,
++    )
++    if len(source.records) != sample_count:
++        raise RuntimeError(
++            f"Requested {sample_count} {split} samples, found "
++            f"{len(source.records)}"
++        )
++    sample_ids = [str(record["id"]) for record in source.records]
++    recorder = _RecordingCalibration(source)
++    (
++        first_layer_inputs,
++        kwargs_by_layer,
++        other_args_by_layer,
++        retained_kwargs,
++        deepstack_contexts,
++    ) = capture_layer_inputs_and_args(
++        model,
++        layers,
++        recorder,
++        batch_size=None,
++        device=device,
++    )
++    if len(first_layer_inputs) != len(recorder.valid_masks):
++        raise RuntimeError(
++            "Captured input and attention-mask batch counts differ: "
++            f"{len(first_layer_inputs)} vs {len(recorder.valid_masks)}"
++        )
++    for index, (hidden, mask) in enumerate(
++        zip(first_layer_inputs, recorder.valid_masks)
++    ):
++        if tuple(hidden.shape[:2]) != tuple(mask.shape):
++            raise RuntimeError(
++                f"Batch {index} hidden/mask mismatch: "
++                f"{tuple(hidden.shape)} vs {tuple(mask.shape)}"
++            )
++    return CapturedSplit(
++        first_layer_inputs=first_layer_inputs,
++        kwargs_by_layer=kwargs_by_layer,
++        other_args_by_layer=other_args_by_layer,
++        retained_kwargs=retained_kwargs,
++        deepstack_contexts=deepstack_contexts,
++        valid_masks=recorder.valid_masks,
++        sample_ids=sample_ids,
++    )
++
++
++def _hidden(output) -> torch.Tensor:
++    if isinstance(output, torch.Tensor):
++        return output
++    if isinstance(output, (tuple, list)):
++        return output[0]
++    if hasattr(output, "last_hidden_state"):
++        return output.last_hidden_state
++    raise TypeError(f"Unsupported decoder output: {type(output).__name__}")
++
++
++@torch.no_grad()
++def forward_original_layer(
++    layer: nn.Module,
++    input_batches: list[torch.Tensor],
++    captured: CapturedSplit,
++    layer_index: int,
++    *,
++    device: torch.device | str,
++    collectors: LayerHessianCollectors | None = None,
++    autocast_dtype: torch.dtype | None = None,
++    retained_kwargs: list[dict] | None = None,
++) -> tuple[list[torch.Tensor], list[dict]]:
++    batch_count = len(input_batches)
++    retained_source = (
++        captured.retained_kwargs
++        if retained_kwargs is None
++        else retained_kwargs
++    )
++    expected = (
++        len(captured.kwargs_by_layer[layer_index]),
++        len(captured.other_args_by_layer[layer_index]),
++        len(retained_source),
++        len(captured.valid_masks),
++    )
++    if any(count != batch_count for count in expected):
++        raise ValueError(
++            f"Layer {layer_index} replay batch mismatch: "
++            f"inputs={batch_count}, related={expected}"
++        )
++
++    updated_retained = deepcopy(retained_source)
++    outputs = []
++    device_type = torch.device(device).type
++    autocast = (
++        torch.amp.autocast(device_type, dtype=autocast_dtype)
++        if autocast_dtype is not None
++        else nullcontext()
++    )
++    with autocast:
++        for batch_index, hidden in enumerate(input_batches):
++            if collectors is not None:
++                collectors.set_position_mask(
++                    captured.valid_masks[batch_index]
++                )
++            kwargs = to_device(
++                deepcopy(
++                    captured.kwargs_by_layer[layer_index][batch_index]
++                ),
++                device,
++            )
++            for key in RETAINED_KWARG_KEYS:
++                if key in updated_retained[batch_index]:
++                    kwargs[key] = to_device(
++                        updated_retained[batch_index][key],
++                        device,
++                    )
++            other_args = to_device(
++                captured.other_args_by_layer[layer_index][batch_index],
++                device,
++            )
++            output = _hidden(
++                layer(
++                    hidden.to(device),
++                    *other_args,
++                    **kwargs,
++                )
++            )
++            outputs.append(output.cpu())
++            for key in RETAINED_KWARG_KEYS:
++                if key in kwargs:
++                    updated_retained[batch_index][key] = to_device(
++                        kwargs[key],
++                        "cpu",
++                    )
++    return outputs, updated_retained
++
++
++def apply_post_layer_context(
++    outputs: list[torch.Tensor],
++    captured: CapturedSplit,
++    layer_index: int,
++) -> list[torch.Tensor]:
++    if len(outputs) != len(captured.deepstack_contexts):
++        raise ValueError(
++            "Output and DeepStack context batch counts differ: "
++            f"{len(outputs)} vs {len(captured.deepstack_contexts)}"
++        )
++    return [
++        apply_deepstack_context(output, context, layer_index)
++        for output, context in zip(
++            outputs,
++            captured.deepstack_contexts,
++        )
++    ]
++
++
++@dataclass
++class ReconstructionBatch:
++    source: torch.Tensor
++    target: torch.Tensor
++    other_args: tuple[torch.Tensor, ...]
++    kwargs: dict
++    retained_kwargs: dict
++    valid_mask: torch.Tensor
++
++
++def build_reconstruction_batches(
++    input_batches: list[torch.Tensor],
++    target_batches: list[torch.Tensor],
++    captured: CapturedSplit,
++    layer_index: int,
++    *,
++    retained_kwargs: list[dict] | None = None,
++) -> list[ReconstructionBatch]:
++    batch_count = len(input_batches)
++    retained_source = (
++        captured.retained_kwargs
++        if retained_kwargs is None
++        else retained_kwargs
++    )
++    related = (
++        len(target_batches),
++        len(captured.kwargs_by_layer[layer_index]),
++        len(captured.other_args_by_layer[layer_index]),
++        len(retained_source),
++        len(captured.valid_masks),
++    )
++    if any(count != batch_count for count in related):
++        raise ValueError(
++            f"Layer {layer_index} reconstruction batch mismatch: "
++            f"inputs={batch_count}, related={related}"
++        )
++    return [
++        ReconstructionBatch(
++            source=source,
++            target=target,
++            other_args=other_args,
++            kwargs=kwargs,
++            retained_kwargs=retained,
++            valid_mask=mask,
++        )
++        for source, target, other_args, kwargs, retained, mask in zip(
++            input_batches,
++            target_batches,
++            captured.other_args_by_layer[layer_index],
++            captured.kwargs_by_layer[layer_index],
++            retained_source,
++            captured.valid_masks,
++        )
++    ]
++
++
++def masked_mse(
++    prediction: torch.Tensor,
++    target: torch.Tensor,
++    valid_mask: torch.Tensor,
++) -> torch.Tensor:
++    if prediction.shape != target.shape:
++        raise ValueError(
++            f"Prediction/target shape mismatch: "
++            f"{tuple(prediction.shape)} vs {tuple(target.shape)}"
++        )
++    if tuple(prediction.shape[:2]) != tuple(valid_mask.shape):
++        raise ValueError(
++            f"Hidden/mask shape mismatch: {tuple(prediction.shape)} vs "
++            f"{tuple(valid_mask.shape)}"
++        )
++    selected = (prediction.float() - target.float())[
++        valid_mask.to(device=prediction.device, dtype=torch.bool)
++    ]
++    if selected.numel() == 0:
++        raise ValueError("Cannot compute MSE without valid positions")
++    return selected.square().mean()
++
++
++class MultimodalReconstructionAdapter:
++    """Duck-typed adapter consumed by QTIP's layer fine-tuner."""
++
++    def __init__(
++        self,
++        train_batches: list[ReconstructionBatch],
++        validation_batches: list[ReconstructionBatch],
++        *,
++        seed: int,
++        mask_padding: bool,
++    ) -> None:
++        if not train_batches or not validation_batches:
++            raise ValueError(
++                "Reconstruction train and validation batches are required"
++            )
++        self.train = train_batches
++        self.validation = validation_batches
++        self.seed = seed
++        self.mask_padding = mask_padding
++
++    def iter_train(self, epoch: int):
++        generator = torch.Generator().manual_seed(self.seed + epoch)
++        for index in torch.randperm(
++            len(self.train),
++            generator=generator,
++        ).tolist():
++            yield self.train[index]
++
++    def _forward(
++        self,
++        layer: nn.Module,
++        batch: ReconstructionBatch,
++        device: torch.device | str,
++    ) -> torch.Tensor:
++        kwargs = to_device(deepcopy(batch.kwargs), device)
++        for key in RETAINED_KWARG_KEYS:
++            if key in batch.retained_kwargs:
++                kwargs[key] = to_device(
++                    deepcopy(batch.retained_kwargs[key]),
++                    device,
++                )
++        return _hidden(
++            layer(
++                batch.source.to(device),
++                *to_device(batch.other_args, device),
++                **kwargs,
++            )
++        )
++
++    def loss(
++        self,
++        layer: nn.Module,
++        batch: ReconstructionBatch,
++        device: torch.device | str,
++    ) -> torch.Tensor:
++        prediction = self._forward(layer, batch, device)
++        target = batch.target.to(device)
++        if self.mask_padding:
++            return masked_mse(
++                prediction,
++                target,
++                batch.valid_mask,
++            )
++        return torch.nn.functional.mse_loss(
++            prediction.float(),
++            target.float(),
++        )
++
++    @torch.no_grad()
++    def validation_loss(
++        self,
++        layer: nn.Module,
++        device: torch.device | str,
++    ) -> float:
++        was_training = layer.training
++        layer.eval()
++        total_squared_error = torch.zeros((), device=device)
++        total_elements = 0
++        try:
++            for batch in self.validation:
++                prediction = self._forward(layer, batch, device)
++                target = batch.target.to(device)
++                difference = prediction.float() - target.float()
++                if self.mask_padding:
++                    selected = difference[
++                        batch.valid_mask.to(
++                            device=device,
++                            dtype=torch.bool,
++                        )
++                    ]
++                else:
++                    selected = difference
++                total_squared_error += selected.square().sum()
++                total_elements += selected.numel()
++        finally:
++            layer.train(was_training)
++        if total_elements == 0:
++            raise ValueError("Validation set contains no scored elements")
++        return (total_squared_error / total_elements).cpu().item()
++
++    @torch.no_grad()
++    def materialize(
++        self,
++        layer: nn.Module,
++        device: torch.device | str,
++    ) -> None:
++        self._forward(layer, self.train[0], device)
+diff --git a/tests/test_qwen3_vl_replay.py b/tests/test_qwen3_vl_replay.py
+new file mode 100644
+index 0000000..9188350
+--- /dev/null
++++ b/tests/test_qwen3_vl_replay.py
+@@ -0,0 +1,180 @@
++from dataclasses import replace
++
++import torch
++from torch import nn
++
++from lib.qwen3_vl.common import freeze_non_qtip_parameters
++from lib.qwen3_vl.replay import (
++    CapturedSplit,
++    MultimodalReconstructionAdapter,
++    ReconstructionBatch,
++    apply_post_layer_context,
++    build_reconstruction_batches,
++    forward_original_layer,
++    masked_mse,
++)
++
++
++class ReplayLayer(nn.Module):
++    def __init__(self):
++        super().__init__()
++        self.projection = nn.Linear(2, 2, bias=False)
++        self.last_kwargs = None
++
++    def forward(
++        self,
++        hidden_states,
++        position_embeddings,
++        attention_mask=None,
++        position_ids=None,
++        scale=1.0,
++        **kwargs,
++    ):
++        self.last_kwargs = {
++            "position_embeddings": position_embeddings,
++            "attention_mask": attention_mask,
++            "position_ids": position_ids,
++            **kwargs,
++        }
++        return self.projection(hidden_states) * scale
++
++
++def captured_split(layer_count=1):
++    mask = torch.tensor([[True, False, True]])
++    position_embeddings = (
++        torch.ones(1, 3, 2),
++        torch.zeros(1, 3, 2),
++    )
++    return CapturedSplit(
++        first_layer_inputs=[torch.ones(1, 3, 2)],
++        kwargs_by_layer=[
++            [
++                {
++                    "position_embeddings": position_embeddings,
++                    "attention_mask": torch.ones(1, 1, 3, 3),
++                    "position_ids": torch.arange(3).unsqueeze(0),
++                    "scale": 2.0,
++                }
++            ]
++            for _ in range(layer_count)
++        ],
++        other_args_by_layer=[[()] for _ in range(layer_count)],
++        retained_kwargs=[{}],
++        deepstack_contexts=[
++            {
++                "valid_token_mask": mask,
++                "visual_pos_masks": torch.tensor(
++                    [[False, True, False]]
++                ),
++                "deepstack_visual_embeds": [
++                    torch.tensor([[3.0, 4.0]]),
++                    torch.tensor([[5.0, 6.0]]),
++                    torch.tensor([[7.0, 8.0]]),
++                ],
++            }
++        ],
++        valid_masks=[mask],
++        sample_ids=["sample"],
++    )
++
++
++def test_forward_replays_real_layer_kwargs_and_collects_valid_hessian():
++    class MaskRecorder:
++        def __init__(self):
++            self.masks = []
++
++        def set_position_mask(self, mask):
++            self.masks.append(mask)
++
++    layer = ReplayLayer()
++    captured = captured_split()
++    collectors = MaskRecorder()
++
++    outputs, retained = forward_original_layer(
++        layer,
++        captured.first_layer_inputs,
++        captured,
++        0,
++        device="cpu",
++        collectors=collectors,
++    )
++
++    assert len(outputs) == 1
++    assert retained == [{}]
++    assert collectors.masks[0].tolist() == [[True, False, True]]
++    assert layer.last_kwargs["position_embeddings"][0].shape == (1, 3, 2)
++    assert layer.last_kwargs["position_ids"].shape == (1, 3)
++    assert layer.last_kwargs["attention_mask"].shape == (1, 1, 3, 3)
++
++
++def test_deepstack_is_replayed_after_language_layers_zero_one_two():
++    captured = captured_split(layer_count=4)
++    hidden = torch.zeros(1, 3, 2)
++
++    for layer_index, expected in enumerate((3.0, 5.0, 7.0)):
++        output = apply_post_layer_context(
++            [hidden],
++            captured,
++            layer_index,
++        )[0]
++        assert output[0, 1, 0].item() == expected
++    torch.testing.assert_close(
++        apply_post_layer_context([hidden], captured, 3)[0],
++        hidden,
++    )
++
++
++def test_masked_mse_ignores_large_padding_error():
++    target = torch.zeros(1, 3, 2)
++    prediction = target.clone()
++    prediction[:, 1, :] = 1000
++    mask = torch.tensor([[True, False, True]])
++
++    assert masked_mse(prediction, target, mask).item() == 0
++
++
++def test_reconstruction_adapter_replays_kwargs_and_masks_padding():
++    layer = ReplayLayer()
++    with torch.no_grad():
++        layer.projection.weight.copy_(torch.eye(2))
++    captured = captured_split()
++    target = captured.first_layer_inputs[0] * 2
++    target[:, 1, :] = -1000
++    batches = build_reconstruction_batches(
++        captured.first_layer_inputs,
++        [target],
++        captured,
++        0,
++    )
++    adapter = MultimodalReconstructionAdapter(
++        batches,
++        batches,
++        seed=0,
++        mask_padding=True,
++    )
++
++    assert adapter.loss(layer, batches[0], "cpu").item() == 0
++    assert adapter.validation_loss(layer, "cpu") == 0
++    assert layer.last_kwargs["position_embeddings"][0].shape == (1, 3, 2)
++
++
++def test_reconstruction_batches_accept_replayed_retained_kwargs():
++    captured = replace(
++        captured_split(),
++        retained_kwargs=[{"shared_kv_states": torch.ones(1, 3, 2)}],
++    )
++    batches = build_reconstruction_batches(
++        captured.first_layer_inputs,
++        captured.first_layer_inputs,
++        captured,
++        0,
++    )
++
++    assert isinstance(batches[0], ReconstructionBatch)
++    assert "shared_kv_states" in batches[0].retained_kwargs
++
++
++def test_freeze_non_qtip_parameters_prepares_layer_for_adapter():
++    layer = ReplayLayer()
++    freeze_non_qtip_parameters(layer)
++    assert all(not parameter.requires_grad for parameter in layer.parameters())
