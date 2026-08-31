@@ -1,0 +1,26 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Zincwolf <zincwolf@outlook.com>
+Date: Mon, 31 Aug 2026 23:15:29 +0800
+Subject: [PATCH] chore: ignore local build artifacts
+
+---
+ .gitignore | 10 ++++++++++
+ 1 file changed, 10 insertions(+)
+ create mode 100644 .gitignore
+
+diff --git a/.gitignore b/.gitignore
+new file mode 100644
+index 0000000..ebf6db9
+--- /dev/null
++++ b/.gitignore
+@@ -0,0 +1,10 @@
++**/__pycache__/
++*.py[cod]
++**/*.egg-info/
++**/.pytest_cache/
++**/.mypy_cache/
++**/.ruff_cache/
++**/build/
++**/dist/
++**/.venv/
++/.uv-cache/

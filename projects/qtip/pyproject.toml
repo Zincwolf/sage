@@ -36,7 +36,7 @@ preview-features = ["extra-build-dependencies"]
 conflicts = [[{ extra = "cu124" }, { extra = "cu128" }]]
 
 [tool.uv.sources]
-fast-hadamard-transform = { git = "https://github.com/Dao-AILab/fast-hadamard-transform.git", rev = "4ea722e434e3d4f2a14522341959ebdbe62be2de" }
+fast-hadamard-transform = { path = "../../third_party/fast-hadamard-transform" }
 paroquant = { path = "../../third_party/paroquant", editable = true }
 qtip = { path = "../../third_party/qtip", editable = true }
 torch = [

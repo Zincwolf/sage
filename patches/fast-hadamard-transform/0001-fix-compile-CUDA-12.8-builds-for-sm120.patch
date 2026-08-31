@@ -1,0 +1,23 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Zincwolf <zincwolf@outlook.com>
+Date: Mon, 31 Aug 2026 22:57:23 +0800
+Subject: [PATCH] fix: compile CUDA 12.8 builds for sm120
+
+---
+ setup.py | 3 +++
+ 1 file changed, 3 insertions(+)
+
+diff --git a/setup.py b/setup.py
+index b41fc6b..446b1b6 100644
+--- a/setup.py
++++ b/setup.py
+@@ -111,6 +111,9 @@ if not SKIP_CUDA_BUILD:
+     if bare_metal_version >= Version("11.8"):
+         cc_flag.append("-gencode")
+         cc_flag.append("arch=compute_90,code=sm_90")
++    if bare_metal_version >= Version("12.8"):
++        cc_flag.append("-gencode")
++        cc_flag.append("arch=compute_120,code=sm_120")
+ 
+     # HACK: The compiler flag -D_GLIBCXX_USE_CXX11_ABI is set to be the same as
+     # torch._C._GLIBCXX_USE_CXX11_ABI

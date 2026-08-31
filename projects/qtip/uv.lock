@@ -211,12 +211,19 @@ wheels = [
 [[package]]
 name = "fast-hadamard-transform"
 version = "1.0.4.post1"
-source = { git = "https://github.com/Dao-AILab/fast-hadamard-transform.git?rev=4ea722e434e3d4f2a14522341959ebdbe62be2de#4ea722e434e3d4f2a14522341959ebdbe62be2de" }
+source = { directory = "../../third_party/fast-hadamard-transform" }
 dependencies = [
     { name = "ninja" },
     { name = "packaging" },
     { name = "torch", version = "2.6.0+cu124", source = { registry = "https://download.pytorch.org/whl/cu124" }, marker = "extra == 'extra-26-weight-vq-qtip-environment-cu124'" },
     { name = "torch", version = "2.9.0+cu128", source = { registry = "https://download.pytorch.org/whl/cu128" }, marker = "extra == 'extra-26-weight-vq-qtip-environment-cu128'" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "ninja" },
+    { name = "packaging" },
+    { name = "torch" },
 ]
 
 [[package]]
@@ -1476,8 +1483,8 @@ requires-dist = [
     { name = "accelerate", marker = "extra == 'cu124'", specifier = "==0.34.2" },
     { name = "accelerate", marker = "extra == 'cu128'", specifier = "==0.34.2" },
     { name = "datasets", specifier = "==2.20.0" },
-    { name = "fast-hadamard-transform", marker = "extra == 'cu124'", git = "https://github.com/Dao-AILab/fast-hadamard-transform.git?rev=4ea722e434e3d4f2a14522341959ebdbe62be2de" },
-    { name = "fast-hadamard-transform", marker = "extra == 'cu128'", git = "https://github.com/Dao-AILab/fast-hadamard-transform.git?rev=4ea722e434e3d4f2a14522341959ebdbe62be2de" },
+    { name = "fast-hadamard-transform", marker = "extra == 'cu124'", directory = "../../third_party/fast-hadamard-transform" },
+    { name = "fast-hadamard-transform", marker = "extra == 'cu128'", directory = "../../third_party/fast-hadamard-transform" },
     { name = "glog", specifier = "==0.3.1" },
     { name = "huggingface-hub", specifier = ">=0.30,<1" },
     { name = "numpy", specifier = "==2.1.2" },
