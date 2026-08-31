@@ -3,7 +3,8 @@ from pathlib import Path
 import pytest
 
 from weight_vq import worker
-from weight_vq.config import CalibrationConfig, PendingPipelineConfig, TokenizerConfig
+from weight_vq.config import CalibrationConfig, TokenizerConfig
+from weight_vq.qtip.config import QTIPConfig
 from weight_vq.sphquant.config import SPHQuantConfig
 
 
@@ -56,25 +57,43 @@ def test_cli_options_after_config_override_same_named_fields(
     ]
 
 
-def test_worker_loads_and_forwards_config(
+def test_worker_loads_and_forwards_qtip_config(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     config = tmp_path / "qtip.yaml"
     config.write_text(
-        "model: /models/qwen3\n"
-        "calibration: outputs/calibration.pt\n"
-        "output: outputs/qtip\n"
+        "model: /models/qwen3-vl\n"
+        "calibration: /data/coco.manifest.json\n"
+        "hessians: outputs/qtip/hessians\n"
+        "checkpoints: outputs/qtip/trellis\n"
+        "exported_model: outputs/qtip/hf-dense-qdq\n"
+        "devices: [0, 2]\n"
+        "train_samples: 16\n"
+        "validation_samples: 8\n"
+        "batch_size: 4\n"
+        "reconstruction_epochs: 1\n"
+        "layer_start: 0\n"
+        "layer_end: 4\n"
     )
-    received: list[PendingPipelineConfig] = []
+    received: list[QTIPConfig] = []
     monkeypatch.setattr(worker, "load_stage", lambda _specification: received.append)
 
     worker.main(["qtip", "export", "--config", str(config)])
 
     assert received == [
-        PendingPipelineConfig(
-            model=Path("/models/qwen3"),
-            calibration=Path("outputs/calibration.pt"),
-            output=Path("outputs/qtip"),
+        QTIPConfig(
+            model=Path("/models/qwen3-vl"),
+            calibration=Path("/data/coco.manifest.json"),
+            hessians=Path("outputs/qtip/hessians"),
+            checkpoints=Path("outputs/qtip/trellis"),
+            exported_model=Path("outputs/qtip/hf-dense-qdq"),
+            devices=[0, 2],
+            train_samples=16,
+            validation_samples=8,
+            batch_size=4,
+            reconstruction_epochs=1,
+            layer_start=0,
+            layer_end=4,
         )
     ]
 

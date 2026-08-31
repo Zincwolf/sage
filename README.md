@@ -75,7 +75,7 @@ uv run wvq sphquant optimize --config configs/sphquant/qwen3.yaml
 - `wvq quip-sharp {hessian,quantize,export,validate}`
 - `wvq sphquant {optimize,export,validate}`
 
-目前 package、环境和命令框架已经就绪，算法 stage 尚在迁移；占位 stage 会明确抛出 `NotImplementedError`。
+QTIP 的 Qwen3-VL dense-QDQ 四阶段 pipeline 与 SPHQuant 的文本模型 pipeline 已接通；QuIP-Sharp 仍是占位实现。
 
 ## 开发检查
 

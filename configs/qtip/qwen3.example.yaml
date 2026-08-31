@@ -1,4 +1,23 @@
-# QTIP schema will be populated when the verified adapter is migrated.
-model: /path/to/base-model
-calibration: outputs/calibration/calibration.pt
-output: outputs/qtip
+# Original Qwen3-VL Hugging Face model and frozen COCO multimodal manifest.
+model: /path/to/Qwen3-VL-8B-Instruct
+calibration: /path/to/coco-calibration.manifest.json
+
+# All workers share flat, layer-indexed Hessian and trellis directories.
+hessians: outputs/qtip/hessians
+checkpoints: outputs/qtip/trellis
+exported_model: outputs/qtip/hf-dense-qdq
+
+# One physical CUDA index enables single-GPU execution; multiple indices split
+# the configured layer range into contiguous, balanced shards.
+devices: [0, 1, 2, 3]
+
+train_samples: 512
+validation_samples: 128
+batch_size: 16
+reconstruction_epochs: 10
+learning_rate: 0.000003
+seed: 0
+
+# null means all 36 language decoder layers.
+layer_start: 0
+layer_end: null
