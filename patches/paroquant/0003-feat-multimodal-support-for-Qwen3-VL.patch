@@ -6,9 +6,9 @@ Subject: [PATCH] feat: multimodal support for Qwen3 VL
 ---
  paroquant/cli/optimize.py        |  65 ++++++++--
  paroquant/optim/multimodal.py    |  52 +++++++-
- paroquant/optim/util.py          | 127 ++++++++++++++++---
+ paroquant/optim/util.py          | 119 ++++++++++++++++--
  tests/test_multimodal_capture.py | 207 +++++++++++++++++++++++++++++++
- 4 files changed, 424 insertions(+), 27 deletions(-)
+ 4 files changed, 418 insertions(+), 25 deletions(-)
  create mode 100644 tests/test_multimodal_capture.py
 
 diff --git a/paroquant/cli/optimize.py b/paroquant/cli/optimize.py
@@ -249,10 +249,10 @@ index 61c8b0b..4186287 100644
              finally:
                  for image in images:
 diff --git a/paroquant/optim/util.py b/paroquant/optim/util.py
-index 14eb71f..e74dc55 100644
+index b5ac9a0..d74802e 100644
 --- a/paroquant/optim/util.py
 +++ b/paroquant/optim/util.py
-@@ -241,6 +241,7 @@ def capture_layer_inputs_and_args(
+@@ -239,6 +239,7 @@ def capture_layer_inputs_and_args(
      list[list[dict]],
      list[list[tuple[torch.Tensor, ...]]],
      list[dict],
@@ -260,7 +260,7 @@ index 14eb71f..e74dc55 100644
  ]:
      if isinstance(samples, torch.Tensor):
          device = samples.device
-@@ -250,6 +251,7 @@ def capture_layer_inputs_and_args(
+@@ -248,6 +249,7 @@ def capture_layer_inputs_and_args(
      first_layer_input_batches: list[torch.Tensor] = []
      other_args_batches_list: list[list[tuple[torch.Tensor, ...]]] = [[] for _ in range(len(layers))]
      retained_kwargs_batches: list[dict] = []
@@ -268,7 +268,7 @@ index 14eb71f..e74dc55 100644
      cpu_tensor_cache: dict[tuple[int, int], torch.Tensor] = {}
  
      def to_cpu_cached(value, batch_idx: int):
-@@ -290,7 +292,10 @@ def capture_layer_inputs_and_args(
+@@ -288,7 +290,10 @@ def capture_layer_inputs_and_args(
              kwargs_batches_list[self.layer_idx].append(layer_kwargs)
  
              other_args_batches_list[self.layer_idx].append(
@@ -280,22 +280,7 @@ index 14eb71f..e74dc55 100644
              )
              retained_kwargs = {
                  key: to_cpu_cached(kwargs[key], batch_idx)
-@@ -300,8 +305,12 @@ def capture_layer_inputs_and_args(
-             if self.layer_idx == 0:
-                 retained_kwargs_batches.append(retained_kwargs)
- 
--            # Decoder layers in transformers==4.52.4 return a tuple; the
--            # model stack immediately reads layer_outputs[0].
-+            # Transformers 4.57 decoder layers return a Tensor. Older
-+            # decoder stacks expect a tuple and index layer_outputs[0].
-+            if getattr(self.module.forward, "__annotations__", {}).get(
-+                "return"
-+            ) is torch.Tensor:
-+                return torch.empty_like(args[0], device=device)
-             return (torch.empty_like(args[0], device=device),)
- 
-         def __getattr__(self, name):
-@@ -310,27 +319,115 @@ def capture_layer_inputs_and_args(
+@@ -306,27 +311,115 @@ def capture_layer_inputs_and_args(
      for layer_idx, layer in enumerate(layers):
          layers[layer_idx] = Catcher(layer, layer_idx)
  

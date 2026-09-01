@@ -12,7 +12,7 @@ dependencies = [
     "scipy==1.14.1",
     "simple-parsing==0.1.9",
     "tqdm==4.66.4",
-    "transformers==4.52.4",
+    "transformers==4.57.6",
     "wandb==0.28.2",
     "weight-vq",
 ]
@@ -21,10 +21,12 @@ dependencies = [
 cu124 = [
     "accelerate==0.34.2",
     "torch==2.6.0",
+    "torchvision==0.21.0",
 ]
 cu128 = [
     "accelerate==0.34.2",
     "torch==2.9.0",
+    "torchvision==0.24.0",
 ]
 
 [tool.uv]
@@ -34,6 +36,10 @@ conflicts = [[{ extra = "cu124" }, { extra = "cu128" }]]
 [tool.uv.sources]
 paroquant = { path = "../../third_party/paroquant", editable = true }
 torch = [
+    { index = "pytorch-cu124", extra = "cu124" },
+    { index = "pytorch-cu128", extra = "cu128" },
+]
+torchvision = [
     { index = "pytorch-cu124", extra = "cu124" },
     { index = "pytorch-cu128", extra = "cu128" },
 ]
