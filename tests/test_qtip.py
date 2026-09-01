@@ -111,11 +111,14 @@ def test_qtip_argument_mapping_freezes_verified_recipe() -> None:
             hessians=Path("/hessians"),
             learning_rate=3e-6,
             reconstruction_epochs=10,
+            seed=17,
         )
     )
     assert (args.L, args.K, args.V, args.tlut_bits) == (16, 2, 2, 9)
     assert (args.td_x, args.td_y, args.decode_mode) == (16, 16, "quantlut_sym")
     assert args.split_for_tp is False
+    assert args.disable_kernel is True
+    assert args.seed == 17
     assert args.ft_lr == 3e-6
 
 

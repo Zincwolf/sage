@@ -52,6 +52,8 @@ def qtip_arguments(args: argparse.Namespace) -> Namespace:
         tlut_bits=9,
         decode_mode="quantlut_sym",
         use_fp64=False,
+        seed=args.seed,
+        disable_kernel=True,
         split_for_tp=False,
         tp_rank=8,
     )
