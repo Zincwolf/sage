@@ -23,11 +23,13 @@ cu124 = [
     "accelerate==0.34.2",
     "fast-hadamard-transform==1.0.4.post1",
     "torch==2.6.0",
+    "torchvision==0.21.0",
 ]
 cu128 = [
     "accelerate==0.34.2",
     "fast-hadamard-transform==1.0.4.post1",
     "torch==2.9.0",
+    "torchvision==0.24.0",
 ]
 
 [tool.uv]
@@ -40,6 +42,10 @@ fast-hadamard-transform = { path = "../../third_party/fast-hadamard-transform" }
 paroquant = { path = "../../third_party/paroquant", editable = true }
 qtip = { path = "../../third_party/qtip", editable = true }
 torch = [
+    { index = "pytorch-cu124", extra = "cu124" },
+    { index = "pytorch-cu128", extra = "cu128" },
+]
+torchvision = [
     { index = "pytorch-cu124", extra = "cu124" },
     { index = "pytorch-cu128", extra = "cu128" },
 ]
