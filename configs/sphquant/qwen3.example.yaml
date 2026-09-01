@@ -1,17 +1,19 @@
-# Original dense Hugging Face model and shared tokenized calibration artifact.
+# Original dense Qwen3 Hugging Face model and tokenized calibration artifact.
 model: /path/to/Qwen3-4B-Instruct-2507
 calibration: outputs/calibration/calibration.pt
 
-# optimize writes checkpoints/<model.name>; export reads it and writes exported_model.
-# validate loads exported_model on one GPU and reports Linear weight statistics.
-checkpoints: outputs/sphquant/layerwise
-exported_model: outputs/sphquant/hf-layerwise
+# ParoQuant writes checkpoints/<model.name>; export publishes a dense HF model.
+checkpoints: outputs/sphquant/qwen3-layerwise
+exported_model: outputs/sphquant/qwen3-hf-layerwise
+
+# SPHQuant is sequential across layers and therefore uses one physical GPU.
+device: 0
 
 # Spherical codebook initialization.
 sample_size: 65536
 kmeans_iterations: 20
 
-# Layerwise radius/codebook recovery.
+# Layerwise radius/codebook recovery. The verified full recipe uses 20 epochs.
 epochs: 20
 learning_rate: 0.001
 batch_size: 16
@@ -20,7 +22,7 @@ cache_shards: 8
 resume: true
 checkpointing: true
 
-# Reproducibility and smoke-run controls; null means no limit.
+# Reproducibility and smoke controls; null means all decoder layers/samples.
 seed: 0
 max_layers: null
 calibration_limit: null

@@ -64,6 +64,8 @@ CUDA_HOME=/path/to/cuda-12.8 MAX_JOBS=8 uv sync --project projects/qtip --extra 
 
 ```sh
 cp configs/sphquant/qwen3.example.yaml configs/sphquant/qwen3.yaml
+# For Qwen3-VL, use qwen3-vl.example.yaml and the COCO manifest produced by
+# data/vlm-calibration. Qwen3 continues to use the tokenized calibration artifact.
 # Please prepend `uv run` to `wvq` because it injects the env var "UV"
 uv run wvq sphquant optimize --config configs/sphquant/qwen3.yaml
 ```

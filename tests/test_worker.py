@@ -129,10 +129,11 @@ def test_worker_loads_shared_flat_sphquant_config(
 ) -> None:
     config = tmp_path / "sphquant.yaml"
     config.write_text(
-        "model: /models/qwen3\n"
-        "calibration: outputs/calibration.pt\n"
+        "model: /models/qwen3-vl\n"
+        "calibration: /data/coco.manifest.json\n"
         "checkpoints: outputs/sphquant/layerwise\n"
         "exported_model: outputs/sphquant/hf-layerwise\n"
+        "device: 2\n"
         "sample_size: 512\n"
         "kmeans_iterations: 2\n"
         "epochs: 0\n"
@@ -147,10 +148,11 @@ def test_worker_loads_shared_flat_sphquant_config(
 
     assert received == [
         SPHQuantConfig(
-            model=Path("/models/qwen3"),
-            calibration=Path("outputs/calibration.pt"),
+            model=Path("/models/qwen3-vl"),
+            calibration=Path("/data/coco.manifest.json"),
             checkpoints=Path("outputs/sphquant/layerwise"),
             exported_model=Path("outputs/sphquant/hf-layerwise"),
+            device=2,
             sample_size=512,
             kmeans_iterations=2,
             epochs=0,

@@ -14,6 +14,7 @@ class SPHQuantConfig:
     calibration: Path
     checkpoints: Path
     exported_model: Path
+    device: int = 0
     sample_size: int = 65536
     kmeans_iterations: int = 20
     epochs: int = 20

@@ -1,0 +1,29 @@
+# Original Qwen3-VL Hugging Face model and shared COCO VLM manifest.
+model: /path/to/Qwen3-VL-8B-Instruct
+calibration: /path/to/coco-calibration.manifest.json
+
+# ParoQuant writes checkpoints/<model.name>; export publishes a dense HF model.
+checkpoints: outputs/sphquant/qwen3-vl-layerwise
+exported_model: outputs/sphquant/qwen3-vl-hf-layerwise
+
+# SPHQuant is sequential across layers and therefore uses one physical GPU.
+device: 0
+
+# Spherical codebook initialization.
+sample_size: 65536
+kmeans_iterations: 20
+
+# Layerwise radius/codebook recovery. The verified full recipe uses 20 epochs.
+epochs: 20
+learning_rate: 0.001
+batch_size: 16
+gradient_accumulation_steps: 1
+cache_shards: 8
+resume: true
+checkpointing: true
+
+# Reproducibility and smoke controls; null means all language layers/samples.
+seed: 0
+max_layers: null
+calibration_limit: null
+use_wandb: false
