@@ -3,7 +3,7 @@ from pathlib import Path
 import pytest
 
 from weight_vq import worker
-from weight_vq.config import CalibrationConfig, TokenizerConfig
+from weight_vq.config import CalibrationConfig, TokenizerConfig, VLMCalibrationConfig
 from weight_vq.qtip.config import QTIPConfig
 from weight_vq.sphquant.config import SPHQuantConfig
 
@@ -94,6 +94,31 @@ def test_worker_loads_and_forwards_qtip_config(
             reconstruction_epochs=1,
             layer_start=0,
             layer_end=4,
+        )
+    ]
+
+
+def test_worker_loads_vlm_calibration_config(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    config = tmp_path / "vlm-calibration.yaml"
+    config.write_text(
+        "output_dir: /datasets/sharegpt4v-coco\n"
+        "workers: 8\n"
+        "image_archive: /datasets/train2017.zip\n"
+        "force: true\n"
+    )
+    received: list[VLMCalibrationConfig] = []
+    monkeypatch.setattr(worker, "load_stage", lambda _specification: received.append)
+
+    worker.main(["data", "vlm-calibration", "--config", str(config)])
+
+    assert received == [
+        VLMCalibrationConfig(
+            output_dir=Path("/datasets/sharegpt4v-coco"),
+            workers=8,
+            image_archive=Path("/datasets/train2017.zip"),
+            force=True,
         )
     ]
 

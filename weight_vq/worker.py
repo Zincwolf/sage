@@ -10,7 +10,11 @@ from typing import Any
 
 from jsonargparse import ArgumentParser
 
-from weight_vq.config import CalibrationConfig, PendingPipelineConfig
+from weight_vq.config import (
+    CalibrationConfig,
+    PendingPipelineConfig,
+    VLMCalibrationConfig,
+)
 from weight_vq.qtip.config import QTIPConfig
 from weight_vq.sphquant.config import SPHQuantConfig
 
@@ -18,6 +22,7 @@ Stage = Callable[[Any], None]
 
 STAGES: dict[tuple[str, str], str] = {
     ("data", "calibration"): "weight_vq.calibration:main",
+    ("data", "vlm-calibration"): "weight_vq.vlm_calibration:main",
     ("qtip", "hessian"): "weight_vq.qtip.pipeline:hessian",
     ("qtip", "quantize"): "weight_vq.qtip.pipeline:quantize",
     ("qtip", "export"): "weight_vq.qtip.pipeline:export",
@@ -33,6 +38,7 @@ STAGES: dict[tuple[str, str], str] = {
 
 CONFIG_TYPES = {
     ("data", "calibration"): CalibrationConfig,
+    ("data", "vlm-calibration"): VLMCalibrationConfig,
     ("qtip", "hessian"): QTIPConfig,
     ("qtip", "quantize"): QTIPConfig,
     ("qtip", "export"): QTIPConfig,

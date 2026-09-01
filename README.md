@@ -71,11 +71,10 @@ uv run wvq sphquant optimize --config configs/sphquant/qwen3.yaml
 统一接口为 `wvq <method> <stage> --config <yaml>`。当前命令布局：
 
 - `wvq data calibration`
+- `wvq data vlm-calibration`
 - `wvq qtip {hessian,quantize,export,validate}`
 - `wvq quip-sharp {hessian,quantize,export,validate}`
 - `wvq sphquant {optimize,export,validate}`
-
-QTIP 的 Qwen3-VL dense-QDQ 四阶段 pipeline 与 SPHQuant 的文本模型 pipeline 已接通；QuIP-Sharp 仍是占位实现。
 
 ## 开发检查
 

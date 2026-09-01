@@ -11,7 +11,7 @@ from pathlib import Path
 
 METHOD_PROJECTS = ["data", "qtip", "quip-sharp", "sphquant"]
 METHOD_STAGES = {
-    "data": ("calibration",),
+    "data": ("calibration", "vlm-calibration"),
     "qtip": ("hessian", "quantize", "export", "validate"),
     "quip-sharp": ("hessian", "quantize", "export", "validate"),
     "sphquant": ("optimize", "export", "validate"),
