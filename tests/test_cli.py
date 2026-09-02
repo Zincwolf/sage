@@ -25,11 +25,7 @@ def test_cli_options_after_config_override_same_named_fields(
         "sequence_length: 2048\n"
     )
     received: list[CalibrationConfig] = []
-    monkeypatch.setitem(
-        cli.STAGES,
-        ("data", "calibration"),
-        (received.append, CalibrationConfig),
-    )
+    monkeypatch.setitem(cli.STAGES, ("data", "calibration"), (received.append, CalibrationConfig))
 
     cli.main(
         [
@@ -46,9 +42,7 @@ def test_cli_options_after_config_override_same_named_fields(
     assert received == [
         CalibrationConfig(
             tokenizer=TokenizerConfig(
-                name="original",
-                path=Path("/models/override"),
-                revision="revision",
+                name="original", path=Path("/models/override"), revision="revision"
             ),
             dataset_cache=Path("/datasets"),
             output=Path("outputs/calibration.pt"),
@@ -80,11 +74,7 @@ def test_cli_loads_and_forwards_qtip_config(
         "layer_end: 4\n"
     )
     received: list[QTIPConfig] = []
-    monkeypatch.setitem(
-        cli.STAGES,
-        ("qtip", "export"),
-        (received.append, QTIPConfig),
-    )
+    monkeypatch.setitem(cli.STAGES, ("qtip", "export"), (received.append, QTIPConfig))
 
     cli.main(["qtip", "export", "--config", str(config)])
 
@@ -106,9 +96,7 @@ def test_cli_loads_and_forwards_qtip_config(
     ]
 
 
-def test_cli_loads_vlm_calibration_config(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
+def test_cli_loads_vlm_calibration_config(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     config = tmp_path / "vlm-calibration.yaml"
     config.write_text(
         "output_dir: /datasets/sharegpt4v-coco\n"
@@ -118,9 +106,7 @@ def test_cli_loads_vlm_calibration_config(
     )
     received: list[VLMCalibrationConfig] = []
     monkeypatch.setitem(
-        cli.STAGES,
-        ("data", "vlm-calibration"),
-        (received.append, VLMCalibrationConfig),
+        cli.STAGES, ("data", "vlm-calibration"), (received.append, VLMCalibrationConfig)
     )
 
     cli.main(["data", "vlm-calibration", "--config", str(config)])
@@ -154,11 +140,7 @@ def test_cli_loads_shared_flat_sphquant_config(
         "calibration_limit: 32\n"
     )
     received: list[SPHQuantConfig] = []
-    monkeypatch.setitem(
-        cli.STAGES,
-        ("sphquant", stage),
-        (received.append, SPHQuantConfig),
-    )
+    monkeypatch.setitem(cli.STAGES, ("sphquant", stage), (received.append, SPHQuantConfig))
 
     cli.main(["sphquant", stage, "--config", str(config)])
 

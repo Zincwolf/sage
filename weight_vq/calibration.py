@@ -82,10 +82,7 @@ def _load_rows(cache: Path, key: str, split: str, seed: int) -> Any:
 
 
 def _text_blocks(
-    rows: Iterable[Mapping[str, Any]],
-    tokenizer: Any,
-    samples: int,
-    sequence_length: int,
+    rows: Iterable[Mapping[str, Any]], tokenizer: Any, samples: int, sequence_length: int
 ) -> list[list[int]]:
     """Strip, tokenize, filter, concatenate, then cut fixed-length blocks."""
     tokens: list[int] = []
@@ -113,23 +110,13 @@ def _allocation(samples: int) -> dict[str, int]:
 
 
 def _mixed_blocks(
-    tokenizer: Any,
-    cache: Path,
-    split: str,
-    samples: int,
-    sequence_length: int,
-    seed: int,
+    tokenizer: Any, cache: Path, split: str, samples: int, sequence_length: int, seed: int
 ) -> list[list[int]]:
     allocation = _allocation(samples)
     blocks = []
     for key, quota in allocation.items():
         blocks.extend(
-            _text_blocks(
-                _load_rows(cache, key, split, seed),
-                tokenizer,
-                quota,
-                sequence_length,
-            )
+            _text_blocks(_load_rows(cache, key, split, seed), tokenizer, quota, sequence_length)
         )
     random.Random(seed).shuffle(blocks)
     return blocks

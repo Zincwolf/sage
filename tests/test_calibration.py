@@ -15,13 +15,7 @@ class CharacterTokenizer:
 
 
 def test_text_blocks_filter_concatenate_and_chunk() -> None:
-    rows = [
-        {"text": ""},
-        {"text": " too-long "},
-        {"text": " ab "},
-        {"text": "cd"},
-        {"text": "ef"},
-    ]
+    rows = [{"text": ""}, {"text": " too-long "}, {"text": " ab "}, {"text": "cd"}, {"text": "ef"}]
 
     assert calibration._text_blocks(rows, CharacterTokenizer(), 2, 3) == [
         [ord("a"), ord("b"), ord("c")],
@@ -30,16 +24,8 @@ def test_text_blocks_filter_concatenate_and_chunk() -> None:
 
 
 def test_allocation_gives_remainder_to_last_dataset() -> None:
-    assert calibration._allocation(1920) == {
-        "wikitext2": 640,
-        "c4": 640,
-        "redpajama": 640,
-    }
-    assert calibration._allocation(128) == {
-        "wikitext2": 42,
-        "c4": 42,
-        "redpajama": 44,
-    }
+    assert calibration._allocation(1920) == {"wikitext2": 640, "c4": 640, "redpajama": 640}
+    assert calibration._allocation(128) == {"wikitext2": 42, "c4": 42, "redpajama": 44}
 
 
 def test_redpajama_partition() -> None:
@@ -67,9 +53,7 @@ def test_load_rows_uses_standard_datasets_api(
         received["kwargs"] = kwargs
         return FakeDataset()
 
-    monkeypatch.setitem(
-        sys.modules, "datasets", SimpleNamespace(load_dataset=load_dataset)
-    )
+    monkeypatch.setitem(sys.modules, "datasets", SimpleNamespace(load_dataset=load_dataset))
 
     result = calibration._load_rows(tmp_path, "c4", "train", 9)
 
@@ -87,9 +71,7 @@ def test_load_rows_uses_standard_datasets_api(
 
 
 def test_manifest_path_is_derived_from_output() -> None:
-    assert utils.manifest_path(Path("calibration.pt")) == Path(
-        "calibration.manifest.json"
-    )
+    assert utils.manifest_path(Path("calibration.pt")) == Path("calibration.manifest.json")
 
 
 def test_load_calibration_metadata_from_manifest(tmp_path: Path) -> None:
@@ -98,11 +80,7 @@ def test_load_calibration_metadata_from_manifest(tmp_path: Path) -> None:
         json.dumps(
             {
                 "tensors": {
-                    "train": {
-                        "dtype": "torch.int64",
-                        "shape": [1920, 2048],
-                        "sha256": "a" * 64,
-                    },
+                    "train": {"dtype": "torch.int64", "shape": [1920, 2048], "sha256": "a" * 64},
                     "validation": {
                         "dtype": "torch.int64",
                         "shape": [128, 2048],
@@ -114,9 +92,7 @@ def test_load_calibration_metadata_from_manifest(tmp_path: Path) -> None:
     )
 
     assert calibration.load_calibration_metadata(artifact) == CalibrationMetadata(
-        train_samples=1920,
-        validation_samples=128,
-        sequence_length=2048,
+        train_samples=1920, validation_samples=128, sequence_length=2048
     )
 
 
@@ -126,9 +102,7 @@ def test_tensor_inventory_hash_is_order_independent() -> None:
 
     assert utils.tensor_inventory_sha256(
         {"train": train, "validation": validation}
-    ) == utils.tensor_inventory_sha256(
-        {"validation": validation, "train": train}
-    )
+    ) == utils.tensor_inventory_sha256({"validation": validation, "train": train})
 
 
 def test_expected_hash_is_optional_but_enforced_when_present() -> None:

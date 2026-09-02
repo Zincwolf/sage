@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import gc
 import hashlib
 import json
 import os
 import tempfile
 from pathlib import Path
 from typing import Any
+
+import torch
 
 
 def tensor_sha256(tensor: Any) -> str:
@@ -33,3 +36,26 @@ def temporary_path(path: Path) -> Path:
     descriptor, name = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
     os.close(descriptor)
     return Path(name)
+
+
+def atomic_write_text(path: Path, content: str) -> None:
+    temporary = temporary_path(path)
+    try:
+        temporary.write_text(content)
+        os.replace(temporary, path)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def atomic_torch_save(payload: object, path: Path) -> None:
+    temporary = temporary_path(path)
+    try:
+        torch.save(payload, temporary)
+        os.replace(temporary, path)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def clear_cuda_cache() -> None:
+    gc.collect()
+    torch.cuda.empty_cache()

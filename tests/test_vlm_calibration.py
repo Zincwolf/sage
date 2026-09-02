@@ -46,10 +46,7 @@ def annotations(count: int) -> list[dict[str, object]]:
 
 
 def test_select_annotations_filters_and_is_deterministic() -> None:
-    source = [
-        *annotations(5),
-        {"id": "other", "image": "vg/other.jpg", "conversations": []},
-    ]
+    source = [*annotations(5), {"id": "other", "image": "vg/other.jpg", "conversations": []}]
 
     first = vlm_calibration._select_annotations(source, samples=3, seed=7)
     second = vlm_calibration._select_annotations(source, samples=3, seed=7)
@@ -61,26 +58,15 @@ def test_select_annotations_filters_and_is_deterministic() -> None:
 def test_manifest_uses_reader_compatible_records(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(vlm_calibration, "VALIDATION_SAMPLES", 1)
     records = [
-        vlm_calibration._record(item, vlm_calibration._image_id(item))
-        for item in annotations(3)
+        vlm_calibration._record(item, vlm_calibration._image_id(item)) for item in annotations(3)
     ]
 
     manifest = vlm_calibration._manifest(records)
 
-    assert [record["split"] for record in manifest["records"]] == [
-        "train",
-        "train",
-        "validation",
-    ]
+    assert [record["split"] for record in manifest["records"]] == ["train", "train", "validation"]
     assert [record["sample_index"] for record in manifest["records"]] == [0, 1, 2]
     assert manifest["records"][0]["image"] == "coco/train2017/000000000000.jpg"
-    assert set(manifest["records"][0]) == {
-        "id",
-        "image",
-        "conversations",
-        "split",
-        "sample_index",
-    }
+    assert set(manifest["records"][0]) == {"id", "image", "conversations", "split", "sample_index"}
 
 
 def test_extract_images_reads_only_selected_archive_members(
@@ -104,9 +90,7 @@ def test_extract_images_reads_only_selected_archive_members(
     assert not list(image_dir.glob("*.part"))
 
 
-def test_download_reuses_valid_image(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
+def test_download_reuses_valid_image(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     install_fake_pillow(monkeypatch)
     destination = tmp_path / "000000000001.jpg"
     destination.write_bytes(b"existing")
@@ -137,9 +121,7 @@ def test_download_replaces_invalid_image_atomically(
 
     monkeypatch.setattr(vlm_calibration, "_verify_image", verify)
     monkeypatch.setattr(
-        vlm_calibration.urllib.request,
-        "urlopen",
-        lambda *_args, **_kwargs: Response(b"valid"),
+        vlm_calibration.urllib.request, "urlopen", lambda *_args, **_kwargs: Response(b"valid")
     )
     destination = tmp_path / "000000000001.jpg"
     destination.write_bytes(b"broken")
@@ -176,21 +158,14 @@ def test_main_uses_pinned_hf_revision_and_writes_manifest_last(
     monkeypatch.setattr(
         vlm_calibration,
         "_download_image",
-        lambda item, _directory: vlm_calibration._record(
-            item, vlm_calibration._image_id(item)
-        ),
+        lambda item, _directory: vlm_calibration._record(item, vlm_calibration._image_id(item)),
     )
     output_dir = tmp_path / "output"
 
     vlm_calibration.main(VLMCalibrationConfig(output_dir=output_dir, workers=2))
 
-    manifest = json.loads(
-        (output_dir / vlm_calibration.MANIFEST_NAME).read_text()
-    )
-    assert received["dataset_info"] == (
-        vlm_calibration.REPO_ID,
-        vlm_calibration.REVISION,
-    )
+    manifest = json.loads((output_dir / vlm_calibration.MANIFEST_NAME).read_text())
+    assert received["dataset_info"] == (vlm_calibration.REPO_ID, vlm_calibration.REVISION)
     assert received["download"] == {
         "repo_id": vlm_calibration.REPO_ID,
         "filename": vlm_calibration.ANNOTATION_FILE,

@@ -24,15 +24,9 @@ from weight_vq.sphquant.pipeline import (
 def smoke_config(tmp_path: Path, family: str = "qwen3_vl") -> SPHQuantConfig:
     vlm = family == "qwen3_vl"
     return SPHQuantConfig(
-        model=Path(
-            "/models/Qwen3-VL-8B-Instruct"
-            if vlm
-            else "/models/Qwen3-4B-Instruct-2507"
-        ),
+        model=Path("/models/Qwen3-VL-8B-Instruct" if vlm else "/models/Qwen3-4B-Instruct-2507"),
         calibration=Path(
-            "/data/coco_calibration_manifest.json"
-            if vlm
-            else "outputs/calibration.pt"
+            "/data/coco_calibration_manifest.json" if vlm else "outputs/calibration.pt"
         ),
         checkpoints=tmp_path / "checkpoints",
         exported_model=tmp_path / ("hf-vlm" if vlm else "hf-text"),
@@ -72,14 +66,11 @@ def install_fake_optimizer(
     return parsed, reference_parse
 
 
-def test_model_contract_accepts_only_qwen3_and_qwen3_vl(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+def test_model_contract_accepts_only_qwen3_and_qwen3_vl(monkeypatch: pytest.MonkeyPatch) -> None:
     configs = {
         "text": SimpleNamespace(model_type="qwen3", num_hidden_layers=36),
         "vlm": SimpleNamespace(
-            model_type="qwen3_vl",
-            text_config=SimpleNamespace(num_hidden_layers=40),
+            model_type="qwen3_vl", text_config=SimpleNamespace(num_hidden_layers=40)
         ),
         "other": SimpleNamespace(model_type="llama"),
     }
@@ -104,10 +95,7 @@ def test_optimize_preserves_qwen3_text_recipe(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     parsed, reference_parse = install_fake_optimizer(monkeypatch)
-    monkeypatch.setattr(
-        "weight_vq.sphquant.pipeline._model_contract",
-        lambda _model: ("qwen3", 36),
-    )
+    monkeypatch.setattr("weight_vq.sphquant.pipeline._model_contract", lambda _model: ("qwen3", 36))
     monkeypatch.setattr(
         "weight_vq.sphquant.pipeline.load_calibration_metadata",
         lambda _path: CalibrationMetadata(1920, 128, 2048),
@@ -130,13 +118,10 @@ def test_optimize_preserves_qwen3_text_recipe(
     assert sys.modules["paroquant.cli.optimize"].simple_parsing.parse is reference_parse  # type: ignore[attr-defined]
 
 
-def test_optimize_maps_qwen3_vl_recipe(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
+def test_optimize_maps_qwen3_vl_recipe(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     parsed, _ = install_fake_optimizer(monkeypatch)
     monkeypatch.setattr(
-        "weight_vq.sphquant.pipeline._model_contract",
-        lambda _model: ("qwen3_vl", 36),
+        "weight_vq.sphquant.pipeline._model_contract", lambda _model: ("qwen3_vl", 36)
     )
 
     optimize(smoke_config(tmp_path))
@@ -148,9 +133,7 @@ def test_optimize_maps_qwen3_vl_recipe(
     assert arguments["train_size"] == 1920
     assert arguments["validation_size"] == 128
     assert arguments["calibration_path"] is None
-    assert arguments["multimodal_calibration_path"] == (
-        "/data/coco_calibration_manifest.json"
-    )
+    assert arguments["multimodal_calibration_path"] == ("/data/coco_calibration_manifest.json")
     assert arguments["model_dtype"] == "bfloat16"
     assert arguments["sph_sample_size"] == 512
     assert arguments["sph_kmeans_iterations"] == 2
@@ -170,8 +153,7 @@ def test_export_rejects_incomplete_checkpoints(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     monkeypatch.setattr(
-        "weight_vq.sphquant.pipeline._model_contract",
-        lambda _model: ("qwen3_vl", 36),
+        "weight_vq.sphquant.pipeline._model_contract", lambda _model: ("qwen3_vl", 36)
     )
     with pytest.raises(FileNotFoundError, match="missing 7 SPHQuant checkpoints"):
         export(smoke_config(tmp_path))
@@ -195,10 +177,7 @@ def test_export_runs_shared_converter_in_staging_directory(
     monkeypatch.setitem(sys.modules, "paroquant", ModuleType("paroquant"))
     monkeypatch.setitem(sys.modules, "paroquant.cli", fake_cli)
     monkeypatch.setitem(sys.modules, "paroquant.cli.convert", fake_converter)
-    monkeypatch.setattr(
-        "weight_vq.sphquant.pipeline._model_contract",
-        lambda _model: ("qwen3", 36),
-    )
+    monkeypatch.setattr("weight_vq.sphquant.pipeline._model_contract", lambda _model: ("qwen3", 36))
     original_argv = sys.argv
 
     config = smoke_config(tmp_path, "qwen3")
@@ -261,9 +240,7 @@ class Layer:
     self_attn = SimpleNamespace(
         q_proj=Projection(), k_proj=Projection(), v_proj=Projection(), o_proj=Projection()
     )
-    mlp = SimpleNamespace(
-        gate_proj=Projection(), up_proj=Projection(), down_proj=Projection()
-    )
+    mlp = SimpleNamespace(gate_proj=Projection(), up_proj=Projection(), down_proj=Projection())
 
 
 class TextModel:
@@ -276,10 +253,7 @@ class VLMModel:
 
 @pytest.mark.parametrize(
     ("family", "model_class", "expected_prefix"),
-    [
-        ("qwen3", TextModel, "model.layers"),
-        ("qwen3_vl", VLMModel, "model.language_model.layers"),
-    ],
+    [("qwen3", TextModel, "model.layers"), ("qwen3_vl", VLMModel, "model.language_model.layers")],
 )
 def test_validate_uses_family_hf_api_and_target_statistics(
     monkeypatch: pytest.MonkeyPatch,
@@ -315,10 +289,7 @@ def test_validate_uses_family_hf_api_and_target_statistics(
     fake_transformers.AutoModelForImageTextToText = AutoVLM  # type: ignore[attr-defined]
     monkeypatch.setitem(sys.modules, "torch", fake_torch)
     monkeypatch.setitem(sys.modules, "transformers", fake_transformers)
-    monkeypatch.setattr(
-        "weight_vq.sphquant.pipeline._model_contract",
-        lambda _model: (family, 36),
-    )
+    monkeypatch.setattr("weight_vq.sphquant.pipeline._model_contract", lambda _model: (family, 36))
 
     config = smoke_config(tmp_path, family)
     validate(config)

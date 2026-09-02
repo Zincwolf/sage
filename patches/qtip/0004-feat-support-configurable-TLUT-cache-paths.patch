@@ -1,0 +1,111 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Zincwolf <zincwolf@outlook.com>
+Date: Wed, 2 Sep 2026 14:00:25 +0800
+Subject: [PATCH] feat: support configurable TLUT cache paths
+
+---
+ lib/codebook/bitshift.py | 21 +++++++++++++++++----
+ tests/test_dense_only.py | 36 ++++++++++++++++++++++++++++++++++++
+ 2 files changed, 53 insertions(+), 4 deletions(-)
+
+diff --git a/lib/codebook/bitshift.py b/lib/codebook/bitshift.py
+index c20f225..f3965c7 100644
+--- a/lib/codebook/bitshift.py
++++ b/lib/codebook/bitshift.py
+@@ -88,7 +88,8 @@ class bitshift_codebook(nn.Module):
+                  V=2,
+                  tlut_bits=16,
+                  decode_mode='lut',
+-                 tlut=None):
++                 tlut=None,
++                 tlut_path=None):
+         super(bitshift_codebook, self).__init__()
+         self.idx_dtype = torch.int32
+         self.opt_scale = 1
+@@ -147,7 +148,8 @@ class bitshift_codebook(nn.Module):
+             if tlut is None:
+                 assert tlut_bits > 0
+                 if V == 2:
+-                    fname = f'/tmp/kmeans_{tlut_bits}_{V}.pt'
++                    fname = (f'/tmp/kmeans_{tlut_bits}_{V}.pt'
++                             if tlut_path is None else os.fspath(tlut_path))
+                     if not os.path.exists(fname):
+                         tlut = torch.randn(2**tlut_bits, V)
+                         import scipy
+@@ -156,9 +158,20 @@ class bitshift_codebook(nn.Module):
+                         tlut = torch.tensor(clusters[0])
+                         tlut = (tlut /
+                                 tlut.std(unbiased=False)) * 0.9682458365518543
+-                        torch.save(tlut, fname)
++                        directory = os.path.dirname(fname)
++                        if directory:
++                            os.makedirs(directory, exist_ok=True)
++                        temporary = f'{fname}.tmp-{os.getpid()}'
++                        try:
++                            torch.save(tlut, temporary)
++                            os.replace(temporary, fname)
++                        finally:
++                            if os.path.exists(temporary):
++                                os.unlink(temporary)
+                     else:
+-                        tlut = torch.load(fname)
++                        tlut = torch.load(fname,
++                                          map_location='cpu',
++                                          weights_only=True)
+                 else:
+                     raise Exception
+                 self.register_buffer('tlut', tlut)
+diff --git a/tests/test_dense_only.py b/tests/test_dense_only.py
+index 71f3e3d..b125967 100644
+--- a/tests/test_dense_only.py
++++ b/tests/test_dense_only.py
+@@ -1,6 +1,7 @@
+ from types import SimpleNamespace
+ 
+ import pytest
++import scipy.cluster.vq
+ import torch
+ 
+ 
+@@ -75,6 +76,41 @@ def test_ldlq_runs_without_packed_cuda_kernels():
+     assert torch.isfinite(reconstructed).all()
+ 
+ 
++def test_quantlut_sym_uses_explicit_tlut_path(monkeypatch, tmp_path):
++    from lib.codebook.bitshift import bitshift_codebook
++
++    calls = 0
++
++    def kmeans(_samples, initial):
++        nonlocal calls
++        calls += 1
++        return initial.numpy(), 0.0
++
++    monkeypatch.setattr(scipy.cluster.vq, "kmeans", kmeans)
++    path = tmp_path / "assets" / "tlut.pt"
++    torch.manual_seed(7)
++    generated = bitshift_codebook(
++        L=4,
++        K=1,
++        V=2,
++        tlut_bits=3,
++        decode_mode="quantlut_sym",
++        tlut_path=path,
++    )
++    cached = bitshift_codebook(
++        L=4,
++        K=1,
++        V=2,
++        tlut_bits=3,
++        decode_mode="quantlut_sym",
++        tlut_path=path,
++    )
++
++    assert path.is_file()
++    assert calls == 1
++    torch.testing.assert_close(cached.tlut, generated.tlut)
++
++
+ @pytest.mark.parametrize("rcp", ["row", "col"])
+ def test_quantize_recovers_transformed_hessian_without_tp_reshape(
+     monkeypatch, tmp_path, rcp

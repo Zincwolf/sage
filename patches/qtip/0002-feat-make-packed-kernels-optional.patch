@@ -1,0 +1,53 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Zincwolf <zincwolf@outlook.com>
+Date: Wed, 2 Sep 2026 12:33:51 +0800
+Subject: [PATCH] feat: make packed kernels optional
+
+---
+ lib/codebook/__init__.py  | 13 +++++++++++--
+ lib/utils/kernel_check.py |  4 ++++
+ 2 files changed, 15 insertions(+), 2 deletions(-)
+
+diff --git a/lib/codebook/__init__.py b/lib/codebook/__init__.py
+index 106fc80..68f587d 100644
+--- a/lib/codebook/__init__.py
++++ b/lib/codebook/__init__.py
+@@ -1,6 +1,15 @@
+-import qtip_kernels
+ import torch
+ 
++try:
++    import qtip_kernels
++except ModuleNotFoundError as error:
++    if error.name != "qtip_kernels":
++        raise
++    # Packed CUDA inference is optional for LDLQ and dense-QDQ export.
++    qtip_kernels = None
++
++HAS_QTIP_KERNELS = qtip_kernels is not None
++
+ kernels = [
+     (1024, 1, 3072, 4),
+     (8192, 1, 3072, 4),
+@@ -67,7 +76,7 @@ kernels = [
+ 
+ kdict = {}
+ 
+-for m, n, k, bitrate in kernels:
++for m, n, k, bitrate in kernels if HAS_QTIP_KERNELS else ():
+     torch.library.define(
+         f"quip_lib::decompress_matvec_qtip_{m}_{n}_{k}_{bitrate}",
+         "(Tensor compressed, Tensor x, Tensor codebook) -> Tensor")
+diff --git a/lib/utils/kernel_check.py b/lib/utils/kernel_check.py
+index c739440..7a9c4de 100644
+--- a/lib/utils/kernel_check.py
++++ b/lib/utils/kernel_check.py
+@@ -1,4 +1,8 @@
+ def has_kernel(decode_mode, L, K, V, tlut_bits, td_x, td_y):
++    from lib.codebook import HAS_QTIP_KERNELS
++
++    if not HAS_QTIP_KERNELS:
++        return False
+     if decode_mode != 'quantlut_sym':
+         return False
+     if L != 16:

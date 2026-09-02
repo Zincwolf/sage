@@ -60,8 +60,7 @@ def _download_image(item: dict[str, Any], image_dir: Path) -> dict[str, Any]:
     for attempt in range(5):
         try:
             request = urllib.request.Request(
-                COCO_URL.format(image_id=image_id),
-                headers={"User-Agent": "weight-vq/1.0"},
+                COCO_URL.format(image_id=image_id), headers={"User-Agent": "weight-vq/1.0"}
             )
             with urllib.request.urlopen(request, timeout=60) as response:
                 temporary.write_bytes(response.read())
@@ -78,9 +77,7 @@ def _download_image(item: dict[str, Any], image_dir: Path) -> dict[str, Any]:
 
 
 def _extract_images(
-    selected: list[dict[str, Any]],
-    archive: Path,
-    image_dir: Path,
+    selected: list[dict[str, Any]], archive: Path, image_dir: Path
 ) -> list[dict[str, Any]]:
     if not archive.is_file():
         raise FileNotFoundError(archive)
@@ -107,15 +104,10 @@ def _extract_images(
 
 
 def _select_annotations(
-    annotations: list[dict[str, Any]],
-    *,
-    samples: int = SAMPLES,
-    seed: int = SEED,
+    annotations: list[dict[str, Any]], *, samples: int = SAMPLES, seed: int = SEED
 ) -> list[dict[str, Any]]:
     candidates = [
-        item
-        for item in annotations
-        if str(item.get("image", "")).startswith("coco/train2017/")
+        item for item in annotations if str(item.get("image", "")).startswith("coco/train2017/")
     ]
     if len(candidates) < samples:
         raise ValueError(f"need {samples} COCO annotations, found {len(candidates)}")
@@ -191,12 +183,7 @@ def main(config: VLMCalibrationConfig) -> None:
         json.dumps(
             {
                 key: manifest[key]
-                for key in (
-                    "format",
-                    "samples",
-                    "train_samples",
-                    "validation_samples",
-                )
+                for key in ("format", "samples", "train_samples", "validation_samples")
             },
             indent=2,
         )

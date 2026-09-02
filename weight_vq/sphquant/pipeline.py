@@ -44,26 +44,18 @@ def _physical_device(device: int) -> Generator[None, None, None]:
 def _model_contract(model: Path) -> tuple[ModelFamily, int]:
     from transformers import AutoConfig
 
-    hf_config = AutoConfig.from_pretrained(
-        model,
-        local_files_only=True,
-        trust_remote_code=True,
-    )
+    hf_config = AutoConfig.from_pretrained(model, local_files_only=True, trust_remote_code=True)
     if hf_config.model_type == "qwen3":
         return "qwen3", int(hf_config.num_hidden_layers)
     if hf_config.model_type == "qwen3_vl":
         return "qwen3_vl", int(hf_config.text_config.num_hidden_layers)
-    raise ValueError(
-        f"SPHQuant supports only qwen3 and qwen3_vl, got {hf_config.model_type!r}"
-    )
+    raise ValueError(f"SPHQuant supports only qwen3 and qwen3_vl, got {hf_config.model_type!r}")
 
 
 def _target_layers(config: SPHQuantConfig, model_layers: int) -> range:
     end = model_layers if config.max_layers is None else config.max_layers
     if not 1 <= end <= model_layers:
-        raise ValueError(
-            f"max_layers must be within [1, {model_layers}] or null"
-        )
+        raise ValueError(f"max_layers must be within [1, {model_layers}] or null")
     return range(end)
 
 
@@ -71,10 +63,7 @@ def checkpoint_path(config: SPHQuantConfig, layer: int, projection: str) -> Path
     return config.checkpoints / config.model.name / f"{layer}.{projection}.pt"
 
 
-def missing_checkpoints(
-    config: SPHQuantConfig,
-    model_layers: int | None = None,
-) -> list[Path]:
+def missing_checkpoints(config: SPHQuantConfig, model_layers: int | None = None) -> list[Path]:
     if model_layers is None:
         _, model_layers = _model_contract(config.model)
     return [
@@ -170,9 +159,7 @@ def export(config: SPHQuantConfig) -> None:
     if config.exported_model.exists():
         raise FileExistsError(f"refusing to overwrite {config.exported_model}")
 
-    staging = config.exported_model.with_name(
-        f".{config.exported_model.name}.tmp-{os.getpid()}"
-    )
+    staging = config.exported_model.with_name(f".{config.exported_model.name}.tmp-{os.getpid()}")
     if staging.exists():
         raise FileExistsError(staging)
     config.exported_model.parent.mkdir(parents=True, exist_ok=True)
@@ -207,10 +194,7 @@ def validate(config: SPHQuantConfig) -> None:
     target_layers = _target_layers(config, model_layers)
     with _physical_device(config.device):
         import torch
-        from transformers import (
-            AutoModelForCausalLM,
-            AutoModelForImageTextToText,
-        )
+        from transformers import AutoModelForCausalLM, AutoModelForImageTextToText
 
         loading_arguments = {
             "dtype": "auto",
@@ -220,24 +204,18 @@ def validate(config: SPHQuantConfig) -> None:
             "trust_remote_code": True,
         }
         if family == "qwen3":
-            model = AutoModelForCausalLM.from_pretrained(
-                config.exported_model,
-                **loading_arguments,
-            )
+            model = AutoModelForCausalLM.from_pretrained(config.exported_model, **loading_arguments)
             layers = model.model.layers
             layer_prefix = "model.layers"
         else:
             model = AutoModelForImageTextToText.from_pretrained(
-                config.exported_model,
-                **loading_arguments,
+                config.exported_model, **loading_arguments
             )
             layers = model.model.language_model.layers
             layer_prefix = "model.language_model.layers"
 
         writer = csv.writer(sys.stdout, lineterminator="\n")
-        writer.writerow(
-            ("layer", "p01", "p50", "p99", "abs_p99", "abs_p999", "abs_max")
-        )
+        writer.writerow(("layer", "p01", "p50", "p99", "abs_p99", "abs_p999", "abs_max"))
         with torch.no_grad():
             for index in target_layers:
                 layer = layers[index]
@@ -247,18 +225,14 @@ def validate(config: SPHQuantConfig) -> None:
                         module = getattr(module, part)
                     weight = module.weight.detach().flatten().float()
                     if not torch.isfinite(weight).all():
-                        raise ValueError(
-                            f"non-finite weight: language layer {index} {projection}"
-                        )
+                        raise ValueError(f"non-finite weight: language layer {index} {projection}")
                     stride = max(1, (weight.numel() + 999_999) // 1_000_000)
                     sample = weight[::stride]
                     quantiles = torch.quantile(
-                        sample,
-                        torch.tensor([0.01, 0.5, 0.99], device=sample.device),
+                        sample, torch.tensor([0.01, 0.5, 0.99], device=sample.device)
                     )
                     abs_quantiles = torch.quantile(
-                        sample.abs(),
-                        torch.tensor([0.99, 0.999], device=sample.device),
+                        sample.abs(), torch.tensor([0.99, 0.999], device=sample.device)
                     )
                     writer.writerow(
                         (

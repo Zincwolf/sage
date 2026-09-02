@@ -118,6 +118,13 @@ extend-exclude = ["third_party"]
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "SIM", "RUF"]
 
+[tool.ruff.lint.isort]
+split-on-trailing-comma = false
+
+[tool.ruff.format]
+skip-magic-trailing-comma = true
+quote-style = "double"
+
 [tool.basedpyright]
 typeCheckingMode = "standard"
 pythonVersion = "3.11"

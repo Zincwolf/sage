@@ -10,11 +10,7 @@ from typing import Any
 from jsonargparse import ArgumentParser, Namespace
 
 from weight_vq import calibration, vlm_calibration
-from weight_vq.config import (
-    CalibrationConfig,
-    PendingPipelineConfig,
-    VLMCalibrationConfig,
-)
+from weight_vq.config import CalibrationConfig, PendingPipelineConfig, VLMCalibrationConfig
 from weight_vq.qtip import pipeline as qtip_pipeline
 from weight_vq.qtip.config import QTIPConfig
 from weight_vq.quip_sharp import pipeline as quip_sharp_pipeline
@@ -45,8 +41,7 @@ def parser() -> ArgumentParser:
     cli = ArgumentParser(prog="wvq", description=__doc__)
     methods = cli.add_subcommands(required=True)
     method_parsers = {
-        method: ArgumentParser()
-        for method in dict.fromkeys(method for method, _stage in STAGES)
+        method: ArgumentParser() for method in dict.fromkeys(method for method, _stage in STAGES)
     }
     for method, method_parser in method_parsers.items():
         methods.add_subcommand(method, method_parser)

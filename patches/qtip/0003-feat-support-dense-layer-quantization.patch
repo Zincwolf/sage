@@ -1,0 +1,538 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Zincwolf <zincwolf@outlook.com>
+Date: Wed, 2 Sep 2026 12:33:51 +0800
+Subject: [PATCH] feat: support dense layer quantization
+
+---
+ lib/algo/finetune.py     | 202 +++++++++++++++++++++++++++------------
+ tests/test_dense_only.py | 152 +++++++++++++++++++++++++++++
+ 2 files changed, 293 insertions(+), 61 deletions(-)
+ create mode 100644 tests/test_dense_only.py
+
+diff --git a/lib/algo/finetune.py b/lib/algo/finetune.py
+index 5847eb3..fa00cf4 100644
+--- a/lib/algo/finetune.py
++++ b/lib/algo/finetune.py
+@@ -3,6 +3,7 @@ Utilities for fine tuning
+ """
+ import copy
+ import math
++import os
+ from contextlib import contextmanager
+ from operator import attrgetter
+ 
+@@ -12,12 +13,22 @@ from torch import multiprocessing as mp
+ from torch import nn
+ from transformers import AutoModelForCausalLM
+ 
+-from lib import codebook, utils
++from lib import utils
+ from lib.linear import QuantizedLinear
+ 
+ from . import ldlq
+ 
+ 
++def atomic_torch_save(payload, path):
++    temporary = f'{path}.tmp-{os.getpid()}'
++    try:
++        torch.save(payload, temporary)
++        os.replace(temporary, path)
++    finally:
++        if os.path.exists(temporary):
++            os.unlink(temporary)
++
++
+ @contextmanager
+ def use_tf32():
+     fp32_matmul_precision = torch.get_float32_matmul_precision()
+@@ -27,43 +38,72 @@ def use_tf32():
+ 
+ 
+ def finetune_decoder_layer(layer, name, device, train_dl, valid_dl, orig_dtype,
+-                           args):
++                           args, reconstruction_adapter=None):
+     with use_tf32():
+         layer = layer.to(device)
+ 
+-        source = next(iter(train_dl))[0]
+-        position_ids = torch.arange(source.shape[1], device=device).unsqueeze(0)
+-        # manifest tensor parallel attributes in layer
+-        output = layer(source.to(device),
+-                       position_ids=position_ids)[0]
++        if reconstruction_adapter is None:
++            source = next(iter(train_dl))[0]
++            position_ids = torch.arange(
++                source.shape[1], device=device).unsqueeze(0)
++            # manifest tensor parallel attributes in layer
++            layer(source.to(device), position_ids=position_ids)[0]
++        else:
++            reconstruction_adapter.materialize(layer, device)
+         
+         best_sd = {k: v.cpu() for k, v in layer.state_dict().items()}
+         utils.clean()
+ 
+-        optim = torch.optim.Adam(layer.parameters(), lr=args.ft_lr)
+-        best_loss = utils.calculate_mse_loss(layer, valid_dl, device)
++        optim = torch.optim.Adam(layer.parameters(), lr=args.learning_rate)
++        if reconstruction_adapter is None:
++            best_loss = utils.calculate_mse_loss(layer, valid_dl, device)
++        else:
++            best_loss = reconstruction_adapter.validation_loss(layer, device)
+         glog.info(f'layer {name} initial loss {best_loss}')
+         scaler = torch.cuda.amp.GradScaler(enabled=(orig_dtype==torch.float16))
+         worse_ct = 0
+ 
+-        for epoch in range(args.ft_epochs):
+-            for bidx, (source, targets) in enumerate(train_dl):
+-                targets = targets.to(device, non_blocking=True)
++        for epoch in range(args.reconstruction_epochs):
++            train_batches = (
++                train_dl
++                if reconstruction_adapter is None
++                else reconstruction_adapter.iter_train(epoch)
++            )
++            num_train_batches = (
++                len(train_dl)
++                if reconstruction_adapter is None
++                else len(reconstruction_adapter.train)
++            )
++            for bidx, batch in enumerate(train_batches):
+                 with torch.autocast(device_type='cuda',
+                                     dtype=orig_dtype,
+                                     enabled=True):
+-                    output = layer(source.to(device),
+-                                   position_ids=position_ids)[0]
+-                    loss = nn.MSELoss()(output, targets)
++                    if reconstruction_adapter is None:
++                        source, targets = batch
++                        targets = targets.to(device, non_blocking=True)
++                        output = layer(
++                            source.to(device),
++                            position_ids=position_ids,
++                        )[0]
++                        loss = nn.MSELoss()(output, targets)
++                    else:
++                        loss = reconstruction_adapter.loss(
++                            layer, batch, device)
+                 scaler.scale(loss).backward()
+-                if bidx % args.ft_update_freq == args.ft_update_freq - 1 or bidx == len(
+-                        train_dl) - 1:
++                if (bidx % args.update_frequency ==
++                        args.update_frequency - 1 or
++                        bidx == num_train_batches - 1):
+                     scaler.step(optim)
+                     scaler.update()
+                     optim.zero_grad()
+ 
+-            if epoch % args.ft_valid_freq == (args.ft_valid_freq - 1):
+-                test_loss = utils.calculate_mse_loss(layer, valid_dl, device)
++            if epoch % args.validation_frequency == (args.validation_frequency - 1):
++                if reconstruction_adapter is None:
++                    test_loss = utils.calculate_mse_loss(
++                        layer, valid_dl, device)
++                else:
++                    test_loss = reconstruction_adapter.validation_loss(
++                        layer, device)
+                 if test_loss < best_loss:
+                     glog.info(
+                         f'layer {name} @ epoch {epoch} new loss {test_loss} old loss {best_loss} BETTER'
+@@ -77,7 +117,7 @@ def finetune_decoder_layer(layer, name, device, train_dl, valid_dl, orig_dtype,
+                         f'layer {name} @ epoch {epoch} new loss {test_loss} old loss {best_loss} WORSE'
+                     )
+                     worse_ct += 1
+-                    if worse_ct >= args.ft_early_stop:
++                    if worse_ct >= args.early_stop:
+                         break
+ 
+     del optim, train_dl, valid_dl
+@@ -88,8 +128,9 @@ def finetune_decoder_layer(layer, name, device, train_dl, valid_dl, orig_dtype,
+ 
+ 
+ def quantize_finetune_decoder_layer(mixed_layer, quant_order, idx, cb, args,
+-                                    device, pre_orig_emb, orig_emb):
+-    torch.manual_seed(idx)
++                                    device, pre_orig_emb, orig_emb,
++                                    reconstruction_adapter=None):
++    torch.manual_seed(getattr(args, 'seed', 0) + idx)
+     torch.set_num_threads(args.num_cpu_threads)
+     torch.set_grad_enabled(False)
+ 
+@@ -100,10 +141,18 @@ def quantize_finetune_decoder_layer(mixed_layer, quant_order, idx, cb, args,
+         break
+     mixed_layer = mixed_layer.float()
+ 
+-    train_dl, valid_dl = utils.split_data(pre_orig_emb, orig_emb, args)
++    if args.reconstruction_epochs > 0:
++        if reconstruction_adapter is None:
++            train_dl, valid_dl = utils.split_data(
++                pre_orig_emb, orig_emb, args)
++        else:
++            train_dl = valid_dl = None
++    else:
++        train_dl = valid_dl = None
+ 
+-    has_kernel = utils.has_kernel(args.decode_mode, args.L, args.K, args.V,
+-                                  args.tlut_bits, args.td_x, args.td_y)
++    has_kernel = (args.packed_inference_kernel
++                  and utils.has_kernel(args.decode_mode, args.L, args.K, args.V,
++                                       args.tlut_bits, args.td_x, args.td_y))
+ 
+     for quant_i, (linear_attr, name, in_hess_name, out_hess_name,
+                   rcp) in enumerate(quant_order):
+@@ -116,7 +165,7 @@ def quantize_finetune_decoder_layer(mixed_layer, quant_order, idx, cb, args,
+         SU = (torch.randn(n, device=device).sign() + 1e-5).sign().to(dtype_)
+         SV = (torch.randn(m, device=device).sign() + 1e-5).sign().to(dtype_)
+ 
+-        in_hess_path = f'{args.in_hess_path}/{idx}_{in_hess_name}.pt'
++        in_hess_path = f'{args.hessians}/{idx}_{in_hess_name}.pt'
+         H_data = torch.load(in_hess_path, map_location=torch.device('cpu'))
+         HR = utils.flat_to_sym(H_data['flatH'], H_data['n'])
+         if 'mu' in H_data:
+@@ -181,7 +230,22 @@ def quantize_finetune_decoder_layer(mixed_layer, quant_order, idx, cb, args,
+                 args.scale_override)
+             Wr /= Wscale
+ 
+-        LRr, _ = utils.block_LDL(HRr, args.td_y)
++        transformed_hessian_jitter = 0.0
++        block_ldl = utils.block_LDL(HRr, args.td_y)
++        if block_ldl is None:
++            # A high-dynamic-range PSD Hessian can lose positive definiteness
++            # through cancellation in the FP32 randomized Hadamard transform.
++            # Restore symmetry and regularize again in transformed coordinates.
++            utils.clean()
++            HRr = (HRr + HRr.T) * 0.5
++            transformed_hessian_jitter = args.sigma_reg
++            HRr.diagonal().add_(
++                HRr.diagonal().mean() * transformed_hessian_jitter)
++            block_ldl = utils.block_LDL(HRr.contiguous(), args.td_y)
++        if block_ldl is None:
++            raise RuntimeError(
++                f'block LDL failed for layer {idx} projection {name}')
++        LRr, _ = block_ldl
+         diag = torch.arange(n, device=LRr.device)
+         LRr[diag, diag] = 0
+ 
+@@ -202,12 +266,12 @@ def quantize_finetune_decoder_layer(mixed_layer, quant_order, idx, cb, args,
+         else:
+             packed = packed.view(torch.int16)
+ 
+-        if rcp == 'col':
++        if args.split_for_tp and rcp == 'col':
+             Wr = (Wr.reshape(args.tp_rank, m * n // args.tp_rank) *
+                   Wscale.unsqueeze(-1)).reshape(m, n)
+             hatWr = (hatWr.reshape(args.tp_rank, m * n // args.tp_rank) *
+                      Wscale.unsqueeze(-1)).reshape(m, n)
+-        elif rcp == 'row':
++        elif args.split_for_tp and rcp == 'row':
+             Wr = Wr.reshape(m, args.tp_rank, n // args.tp_rank).transpose(
+                 0, 1).reshape(args.tp_rank, -1) * Wscale.unsqueeze(-1)
+             Wr = Wr.reshape(args.tp_rank, m,
+@@ -228,37 +292,38 @@ def quantize_finetune_decoder_layer(mixed_layer, quant_order, idx, cb, args,
+             f'{idx}_{name} proxy err {err.item()} tr(WHW.T) {torch.trace(Wr @ HRr @ Wr.T)}'
+         )
+         
+-        save_path = f'{args.save_path}/{idx}_{name}.pt'
++        save_path = f'{args.checkpoints}/{idx}_{name}.pt'
+ 
+         # 0 = no tensor parallelism, 1 = row parallel, 2 = column parallel
+         rcp_int = 0
+         if args.split_for_tp:
+             rcp_int = 1 if rcp == 'row' else 2
+ 
+-        torch.save(
+-            {
+-                'trellis':
+-                packed.cpu(),
+-                'SU':
+-                SU.to(orig_dtype).cpu(),
+-                'SV':
+-                SV.to(orig_dtype).cpu(),
+-                'Wscale':
+-                Wscale,
+-                'proxy_err':
+-                err.item(),
+-                'tlut':
++        payload = {
++            'trellis': packed.cpu(),
++            'SU': SU.to(orig_dtype).cpu(),
++            'SV': SV.to(orig_dtype).cpu(),
++            'Wscale': Wscale,
++            'proxy_err': err.item(),
++            'transformed_hessian_jitter': transformed_hessian_jitter,
++            'tlut': (
+                 cb.tlut.data.to(orig_dtype).cpu()
+-                if hasattr(cb, 'tlut') else None,
+-                'rcp':
+-                rcp_int,
+-                'tp_rank':
+-                args.tp_rank
+-            }, save_path)
++                if hasattr(cb, 'tlut') else None
++            ),
++            'rcp': rcp_int,
++            'tp_rank': args.tp_rank,
++        }
++        atomic_torch_save(payload, save_path)
+ 
+ 
+         del HRr, Wr, hatWr, LRr, Qidxs
+         utils.clean()
++
++        if args.reconstruction_epochs == 0:
++            del packed, SU, SV, Wscale
++            cb = cb.cpu()
++            utils.clean()
++            continue
+         
+         q_linear = QuantizedLinear(
+             n,
+@@ -270,9 +335,10 @@ def quantize_finetune_decoder_layer(mixed_layer, quant_order, idx, cb, args,
+             args.V,
+             args.tlut_bits,
+             args.decode_mode,
+-            mode='train-recons' if args.ft_train_lut else 'train-fixW',
++            mode='train-recons' if args.train_lut else 'train-fixW',
+             dtype=orig_dtype,
+-            grad_ckpt=args.ft_grad_ckpt)
++            grad_ckpt=args.gradient_checkpointing)
++        q_linear.has_kernel = has_kernel
+         q_linear.trellis.copy_(packed)
+         q_linear.SU.copy_(SU)
+         q_linear.SV.copy_(SV)
+@@ -283,13 +349,13 @@ def quantize_finetune_decoder_layer(mixed_layer, quant_order, idx, cb, args,
+         del packed, SU, SV
+         utils.clean()
+         
+-        if rcp == 'row':
++        if args.split_for_tp and rcp == 'row':
+             q_linear.SU = nn.Parameter(
+                 (q_linear.SU.reshape(args.tp_rank, -1) *
+                  Wscale.unsqueeze(-1)).reshape(q_linear.SU.shape),
+                 requires_grad=True)
+             q_linear.SV = nn.Parameter(q_linear.SV, requires_grad=True)
+-        elif rcp == 'col':
++        elif args.split_for_tp and rcp == 'col':
+             q_linear.SU = nn.Parameter(q_linear.SU, requires_grad=True)
+             q_linear.SV = nn.Parameter(
+                 (q_linear.SV.reshape(args.tp_rank, -1) *
+@@ -302,7 +368,7 @@ def quantize_finetune_decoder_layer(mixed_layer, quant_order, idx, cb, args,
+ 
+         if q_linear.tlut is not None:
+             q_linear.tlut.copy_(cb.tlut.data)
+-            q_linear.tlut.requires_grad = args.ft_train_lut
++            q_linear.tlut.requires_grad = args.train_lut
+ 
+         split_attr = linear_attr.split('.')
+         setattr(
+@@ -310,24 +376,38 @@ def quantize_finetune_decoder_layer(mixed_layer, quant_order, idx, cb, args,
+             q_linear)
+ 
+         with torch.enable_grad():
+-            finetune_decoder_layer(mixed_layer, f'{idx}_{name}', device,
+-                                   train_dl, valid_dl, orig_dtype, args)
++            finetune_decoder_layer(
++                mixed_layer,
++                f'{idx}_{name}',
++                device,
++                train_dl,
++                valid_dl,
++                orig_dtype,
++                args,
++                reconstruction_adapter,
++            )
+ 
+         cb = cb.cpu()
+         utils.clean()
+ 
++    if args.reconstruction_epochs == 0:
++        mixed_layer = mixed_layer.to(orig_dtype).cpu()
++        utils.clean()
++        torch.set_grad_enabled(False)
++        return
++
+     for quant_i, (linear_attr, name, in_hess_name, out_hess_name,
+                   rcp) in enumerate(quant_order):
+         quant_linear = attrgetter(linear_attr)(mixed_layer)
+-        save_path = f'{args.save_path}/{idx}_{name}.pt'
+-        data = torch.load(save_path)
+-        if rcp == 'row':
++        save_path = f'{args.checkpoints}/{idx}_{name}.pt'
++        data = torch.load(save_path, weights_only=True)
++        if args.split_for_tp and rcp == 'row':
+             data['SU'] = (
+                 ((quant_linear.SU.data).reshape(args.tp_rank, -1) /
+                  data['Wscale'].to(quant_linear.SU.device).unsqueeze(-1)
+                  ).reshape(quant_linear.SU.data.shape)).to(orig_dtype).cpu()
+             data['SV'] = quant_linear.SV.data.to(orig_dtype).cpu()
+-        elif rcp == 'col':
++        elif args.split_for_tp and rcp == 'col':
+             data['SU'] = quant_linear.SU.data.to(orig_dtype).cpu()
+             data['SV'] = (
+                 ((quant_linear.SV.data).reshape(args.tp_rank, -1) /
+@@ -340,7 +420,7 @@ def quantize_finetune_decoder_layer(mixed_layer, quant_order, idx, cb, args,
+ 
+         if quant_linear.tlut is not None:
+             data['tlut'] = quant_linear.tlut.data.to(orig_dtype).cpu()
+-        torch.save(data, save_path)
++        atomic_torch_save(data, save_path)
+ 
+     mixed_layer = mixed_layer.to(orig_dtype).cpu()
+ 
+diff --git a/tests/test_dense_only.py b/tests/test_dense_only.py
+new file mode 100644
+index 0000000..71f3e3d
+--- /dev/null
++++ b/tests/test_dense_only.py
+@@ -0,0 +1,152 @@
++from types import SimpleNamespace
++
++import pytest
++import torch
++
++
++def test_codebook_imports_without_packed_cuda_kernels():
++    from lib.codebook import HAS_QTIP_KERNELS
++    from lib.codebook.bitshift import bitshift_codebook
++    from lib.utils.kernel_check import has_kernel
++
++    assert not HAS_QTIP_KERNELS
++    assert not has_kernel("quantlut_sym", 16, 2, 2, 9, 16, 16)
++
++    tlut = torch.randn(1 << 3, 2)
++    codebook = bitshift_codebook(
++        L=4,
++        K=1,
++        V=2,
++        tlut_bits=3,
++        decode_mode="quantlut_sym",
++        tlut=tlut,
++    )
++    values = torch.randn(4, 4)
++    reconstructed, trellis = codebook.quantize(values)
++
++    assert reconstructed.shape == values.shape
++    assert trellis.shape == (4, 2)
++    assert torch.isfinite(reconstructed).all()
++
++
++def test_dense_trellis_roundtrip_without_packed_cuda_kernels():
++    from lib.codebook.bitshift import bitshift_codebook
++
++    codebook = bitshift_codebook(
++        L=4,
++        K=1,
++        V=2,
++        tlut_bits=3,
++        decode_mode="quantlut_sym",
++        tlut=torch.randn(1 << 3, 2),
++    )
++    _, trellis = codebook.quantize(torch.randn(4, 4))
++    packed = codebook.pack_trellis(trellis)
++    unpacked = codebook.unpack_trellis(packed, T=4)
++
++    torch.testing.assert_close(unpacked, trellis)
++
++
++def test_ldlq_runs_without_packed_cuda_kernels():
++    from lib.algo.ldlq import LDLQ
++    from lib.codebook.bitshift import bitshift_codebook
++
++    codebook = bitshift_codebook(
++        L=4,
++        K=1,
++        V=2,
++        tlut_bits=3,
++        decode_mode="quantlut_sym",
++        tlut=torch.randn(1 << 3, 2),
++    )
++    weight = torch.randn(4, 4)
++    factor = torch.zeros(4, 4)
++    reconstructed, trellis = LDLQ(
++        weight,
++        factor,
++        codebook,
++        SimpleNamespace(td_x=2, td_y=2, V=2),
++        buf_cols=2,
++        for_kernel=False,
++    )
++
++    assert reconstructed.shape == weight.shape
++    assert trellis.shape == (4, 2)
++    assert torch.isfinite(reconstructed).all()
++
++
++@pytest.mark.parametrize("rcp", ["row", "col"])
++def test_quantize_recovers_transformed_hessian_without_tp_reshape(
++    monkeypatch, tmp_path, rcp
++):
++    from lib.algo import finetune
++
++    class Layer(torch.nn.Module):
++        def __init__(self):
++            super().__init__()
++            self.proj = torch.nn.Linear(4, 6, bias=False)
++
++    class Codebook:
++        lut = torch.ones(2)
++
++        def to(self, *_args):
++            return self
++
++        def cpu(self):
++            return self
++
++        def pack_trellis(self, trellis):
++            return trellis.to(torch.int16)
++
++    hessian = torch.eye(4)
++    hessian[0, 1] = hessian[1, 0] = 1.005
++    lower = torch.tril_indices(4, 4)
++    torch.save({"flatH": hessian[lower[0], lower[1]], "n": 4}, tmp_path / "3_h.pt")
++
++    kernel_modes = []
++    monkeypatch.setattr(finetune.utils, "regularize_H", lambda value, _sigma: value)
++    monkeypatch.setattr(finetune.utils, "matmul_hadUt", lambda value: value)
++    monkeypatch.setattr(finetune.utils, "has_kernel", lambda *_args: True)
++
++    def fake_ldlq(weight, _factor, _codebook, _args, *, for_kernel):
++        kernel_modes.append(for_kernel)
++        return weight.clone(), torch.zeros((6, 2), dtype=torch.int64)
++
++    monkeypatch.setattr(finetune.ldlq, "LDLQ", fake_ldlq)
++    args = SimpleNamespace(
++        seed=11,
++        num_cpu_threads=torch.get_num_threads(),
++        use_fp64=False,
++        reconstruction_epochs=0,
++        decode_mode="quantlut_sym",
++        L=4,
++        K=1,
++        V=2,
++        tlut_bits=3,
++        td_x=2,
++        td_y=2,
++        packed_inference_kernel=False,
++        split_for_tp=False,
++        tp_rank=8,
++        hessians=tmp_path,
++        checkpoints=tmp_path,
++        sigma_reg=1e-2,
++        scale_override=1.0,
++    )
++
++    grad_enabled = torch.is_grad_enabled()
++    try:
++        finetune.quantize_finetune_decoder_layer(
++            Layer(), (("proj", "proj", "h", "unused", rcp),), 3,
++            Codebook(), args, torch.device("cpu"), None, None,
++        )
++    finally:
++        torch.set_grad_enabled(grad_enabled)
++
++    checkpoint = torch.load(tmp_path / "3_proj.pt", weights_only=True)
++    generator = torch.Generator().manual_seed(14)
++    expected_su = (torch.randn(4, generator=generator).sign() + 1e-5).sign()
++    assert torch.equal(checkpoint["SU"], expected_su)
++    assert checkpoint["transformed_hessian_jitter"] == 1e-2
++    assert checkpoint["rcp"] == 0
++    assert kernel_modes == [False]

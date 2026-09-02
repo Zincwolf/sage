@@ -36,7 +36,7 @@ git submodule update --init third_party/paroquant
 
 ```bash
 cp configs/sphquant/qwen3.example.yaml configs/sphquant/qwen3.yaml
-uv run --no-sync wvq sphquant optimize --config configs/sphquant/qwen3.yaml
+uv run wvq sphquant optimize --config configs/sphquant/qwen3.yaml
 ```
 
 统一接口为 `wvq <method> <stage> --config <yaml>`。当前命令布局：
@@ -52,9 +52,12 @@ Qwen3-VL 使用 `data vlm-calibration` 生成的 COCO manifest；Qwen3 使用 to
 ## 开发检查
 
 ```bash
-uv run --no-sync pytest
-uv run --no-sync ruff check .
-uv run --no-sync basedpyright
+uv run pytest
+uv run ruff check .
+uv run basedpyright
+uv run ruff format .
 ```
 
-更新依赖声明后先执行 `uv lock`，同步时使用对应 CUDA extra 和 `--locked`，避免隐式修改 lockfile。
+- 更新依赖声明后先执行 `uv lock`，同步时使用对应 CUDA extra 和 `--locked`，避免隐式修改 lockfile。
+- 不要写 shell 胶水，为了实验方便写的 shell 脚本一律留存于本地。
+- 做新 idea 时开新分支。
