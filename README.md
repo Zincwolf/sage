@@ -6,7 +6,7 @@
 
 | Model                  | Calibration | QTIP | SPHQuant |
 | ---------------------- | ----------- | ---- | -------- |
-| Qwen3-4B-Instruct-2507 | ✅          |      | ✅       |
+| Qwen3-4B-Instruct-2507 | ✅          | ✅   | ✅       |
 | Qwen3-VL-8B-Instruct   | ✅          | ✅   | ✅       |
 
 ## 环境

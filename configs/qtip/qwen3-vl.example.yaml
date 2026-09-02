@@ -2,7 +2,7 @@
 model: /path/to/Qwen3-VL-8B-Instruct
 calibration: /path/to/coco-calibration.manifest.json
 hessians: outputs/qtip/hessians
-checkpoints: outputs/qtip/trellis
+checkpoints: outputs/qtip/checkpoints
 exported_model: outputs/qtip/hf-dense-qdq
 
 # Execution. Multiple physical CUDA indices receive contiguous layer ranges.
@@ -35,7 +35,7 @@ use_fp64: false
 
 # Layer reconstruction. This is the verified baseline; changing these values
 # has unknown numerical-stability, quality, and checkpoint-compatibility consequences.
-reconstruction_epochs: 10
+reconstruction_epochs: 5
 learning_rate: 0.000003
 update_frequency: 1
 validation_frequency: 1

@@ -1,4 +1,4 @@
-"""Qwen3-VL capture and layer replay state for QTIP."""
+"""Layer capture and replay state for QTIP."""
 
 from __future__ import annotations
 
@@ -6,7 +6,7 @@ from collections.abc import Iterator
 from contextlib import nullcontext
 from copy import deepcopy
 from dataclasses import dataclass
-from typing import Any, Protocol, cast
+from typing import Any, Literal, Protocol, cast
 
 import torch
 from accelerate.utils import send_to_device
@@ -128,7 +128,6 @@ class ReplayState:
     other_args_by_layer: list[list[tuple[torch.Tensor, ...]]]
     deepstack_contexts: list[dict[str, Any]]
     valid_masks: list[torch.Tensor]
-    sample_ids: list[str]
     inputs: list[torch.Tensor]
     retained_kwargs: list[dict[str, Any]]
 
@@ -214,29 +213,41 @@ def capture_replay(
     layers: nn.ModuleList,
     config: QTIPConfig,
     *,
+    family: Literal["qwen3", "qwen3_vl"],
     split: str,
     device: torch.device | str,
 ) -> ReplayState:
     sample_count = config.train_samples if split == "train" else config.validation_samples
-    source = CocoCalibrationBatches(
-        config.calibration,
-        model_path=config.model,
-        split=split,
-        batch_size=config.batch_size,
-        limit=sample_count,
-    )
-    if len(source.records) != sample_count:
-        raise RuntimeError(f"Requested {sample_count} {split} samples, found {len(source.records)}")
-    recorder = _RecordingCalibration(source)
-    (inputs, kwargs_by_layer, other_args_by_layer, retained_kwargs, deepstack_contexts) = (
-        capture_layer_inputs_and_args(model, layers, recorder, batch_size=None, device=device)
-    )
+    if family == "qwen3":
+        samples = torch.load(config.calibration, map_location="cpu", weights_only=True)[split][
+            :sample_count
+        ].to(device)
+        inputs, kwargs_by_layer, other_args_by_layer, retained_kwargs, deepstack_contexts = (
+            capture_layer_inputs_and_args(
+                model, layers, samples, batch_size=config.batch_size, device=device
+            )
+        )
+        valid_masks = [
+            torch.ones(input_batch.shape[:2], dtype=torch.bool) for input_batch in inputs
+        ]
+    else:
+        source = CocoCalibrationBatches(
+            config.calibration,
+            model_path=config.model,
+            split=split,
+            batch_size=config.batch_size,
+            limit=sample_count,
+        )
+        recorder = _RecordingCalibration(source)
+        inputs, kwargs_by_layer, other_args_by_layer, retained_kwargs, deepstack_contexts = (
+            capture_layer_inputs_and_args(model, layers, recorder, batch_size=None, device=device)
+        )
+        valid_masks = recorder.valid_masks
     return ReplayState(
         kwargs_by_layer=kwargs_by_layer,
         other_args_by_layer=other_args_by_layer,
         deepstack_contexts=deepstack_contexts,
-        valid_masks=recorder.valid_masks,
-        sample_ids=[str(record["id"]) for record in source.records],
+        valid_masks=valid_masks,
         inputs=inputs,
         retained_kwargs=retained_kwargs,
     )

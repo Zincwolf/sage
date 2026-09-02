@@ -7,6 +7,7 @@ from torch import nn
 
 from weight_vq.qtip import replay
 from weight_vq.qtip.config import QTIPConfig
+from weight_vq.qtip.hessian import LayerHessianCollectors
 from weight_vq.qtip.replay import LayerReplay, ReconstructionAdapter, ReplayState
 
 
@@ -61,7 +62,6 @@ def replay_state(layer_count: int = 1) -> ReplayState:
             }
         ],
         valid_masks=[mask],
-        sample_ids=["sample"],
         inputs=[torch.ones(1, 3, 2)],
         retained_kwargs=[{}],
     )
@@ -116,7 +116,9 @@ def test_capture_replay_reads_the_monolithic_config(
     model = nn.Linear(2, 2)
     layers = nn.ModuleList([ReplayLayer()])
 
-    state = replay.capture_replay(model, layers, config, split="train", device="cuda:3")
+    state = replay.capture_replay(
+        model, layers, config, family="qwen3_vl", split="train", device="cuda:3"
+    )
 
     assert received == {
         "manifest": config.calibration,
@@ -129,9 +131,54 @@ def test_capture_replay_reads_the_monolithic_config(
         "capture_batch_size": None,
         "device": "cuda:3",
     }
-    assert state.sample_ids == ["a", "b"]
     assert state.valid_masks[0].tolist() == [[True, True, False], [True, False, False]]
     assert state.inputs[0].shape == (2, 3, 2)
+
+
+def test_token_capture_replays_real_qwen3_layers(tmp_path: Path) -> None:
+    from transformers import Qwen3Config, Qwen3ForCausalLM
+
+    calibration = tmp_path / "calibration.pt"
+    torch.save(
+        {"train": torch.randint(0, 64, (4, 8)), "validation": torch.randint(0, 64, (2, 8))},
+        calibration,
+    )
+    config = QTIPConfig(
+        model=tmp_path / "model",
+        calibration=calibration,
+        hessians=tmp_path / "hessians",
+        checkpoints=tmp_path / "checkpoints",
+        exported_model=tmp_path / "export",
+        devices=[0],
+        train_samples=4,
+        validation_samples=2,
+        batch_size=2,
+    )
+    model = Qwen3ForCausalLM(
+        Qwen3Config(
+            vocab_size=64,
+            hidden_size=16,
+            intermediate_size=32,
+            num_hidden_layers=2,
+            num_attention_heads=2,
+            num_key_value_heads=1,
+            head_dim=8,
+        )
+    ).eval()
+
+    state = replay.capture_replay(
+        model, model.model.layers, config, family="qwen3", split="train", device="cpu"
+    )
+
+    assert len(state.inputs) == 2
+    assert all(mask.all() for mask in state.valid_masks)
+    assert state.deepstack_contexts == [{}, {}]
+    for index, layer in enumerate(model.model.layers):
+        collectors = LayerHessianCollectors(layer) if index == 0 else None
+        snapshot = state.forward_original(layer, index, device="cpu", collectors=collectors)
+        assert len(snapshot) == 2
+        if collectors is not None:
+            assert all(payload["ct"] == 32 for payload in collectors.close().values())
 
 
 def test_replay_state_forwards_kwargs_collects_mask_and_advances_deepstack() -> None:

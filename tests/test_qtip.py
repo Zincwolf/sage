@@ -2,14 +2,18 @@ import csv
 from contextlib import nullcontext
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
-from typing import Any
+from typing import Any, cast
 
 import pytest
+import torch
+from torch import nn
 
 from weight_vq.qtip.artifacts import layer_complete
 from weight_vq.qtip.config import QTIPConfig
 from weight_vq.qtip.pipeline import (
+    _get_layers,
     _initialize_run,
+    _model_contract,
     _run_workers,
     export,
     split_layer_ranges,
@@ -43,7 +47,7 @@ def test_initialize_run_uses_run_local_tlut(
         "weight_vq.qtip.pipeline.bitshift_codebook", lambda **kwargs: received.append(kwargs)
     )
 
-    _initialize_run(qtip_config)
+    _initialize_run(qtip_config, "qwen3_vl", 10)
 
     assert received[0]["tlut_path"] == qtip_config.checkpoints / "tlut-l16-b9-v2.pt"
 
@@ -51,6 +55,30 @@ def test_initialize_run_uses_run_local_tlut(
 def test_split_layer_ranges_is_balanced_and_contiguous() -> None:
     assert split_layer_ranges(3, 10, [2, 5, 7, 9]) == [(2, 3, 5), (5, 5, 7), (7, 7, 9), (9, 9, 10)]
     assert split_layer_ranges(0, 2, [0, 1, 2, 3]) == [(0, 0, 1), (1, 1, 2)]
+
+
+def test_model_family_selects_configured_decoder_stack(monkeypatch: pytest.MonkeyPatch) -> None:
+    configs = {
+        "text": SimpleNamespace(model_type="qwen3", num_hidden_layers=36),
+        "vlm": SimpleNamespace(
+            model_type="qwen3_vl", text_config=SimpleNamespace(num_hidden_layers=40)
+        ),
+    }
+    monkeypatch.setattr(
+        "weight_vq.qtip.pipeline.AutoConfig.from_pretrained",
+        lambda path, **_kwargs: configs[str(path)],
+    )
+    text_layers = nn.ModuleList([nn.Identity()])
+    vlm_layers = nn.ModuleList([nn.Identity(), nn.Identity()])
+    text_model = SimpleNamespace(model=SimpleNamespace(layers=text_layers))
+    vlm_model = SimpleNamespace(
+        model=SimpleNamespace(language_model=SimpleNamespace(layers=vlm_layers))
+    )
+
+    assert _model_contract(Path("text")) == ("qwen3", 36)
+    assert _model_contract(Path("vlm")) == ("qwen3_vl", 40)
+    assert _get_layers(text_model, "qwen3") is text_layers  # type: ignore[arg-type]
+    assert _get_layers(vlm_model, "qwen3_vl") is vlm_layers  # type: ignore[arg-type]
 
 
 def test_run_workers_uses_spawn_with_direct_config_and_layer_ranges(
@@ -68,7 +96,7 @@ def test_run_workers_uses_spawn_with_direct_config_and_layer_ranges(
 
         def start(self) -> None:
             launches.append((self.target, self.args))
-            _config, _stage, _device, start, end = self.args
+            _config, _stage, _family, _device, start, end = self.args
             assert isinstance(start, int) and isinstance(end, int)
             for index in range(start, end):
                 for name in ("qkv", "o", "up", "down"):
@@ -79,10 +107,11 @@ def test_run_workers_uses_spawn_with_direct_config_and_layer_ranges(
 
     context = SimpleNamespace(Process=Process)
 
-    def initialize(_config: QTIPConfig) -> None:
+    def initialize(_config: QTIPConfig, _family: str, _end: int) -> None:
         qtip_config.hessians.mkdir(parents=True)
         qtip_config.checkpoints.mkdir(parents=True)
 
+    monkeypatch.setattr("weight_vq.qtip.pipeline._model_contract", lambda _model: ("qwen3_vl", 36))
     monkeypatch.setattr("weight_vq.qtip.pipeline._initialize_run", initialize)
     monkeypatch.setattr(
         "weight_vq.qtip.pipeline.multiprocessing.get_context",
@@ -90,9 +119,10 @@ def test_run_workers_uses_spawn_with_direct_config_and_layer_ranges(
     )
     _run_workers(qtip_config, "hessian")
 
-    assert [args[2] for _target, args in launches] == [2, 5, 7, 9]
+    assert [args[3] for _target, args in launches] == [2, 5, 7, 9]
     assert all(args[0] is qtip_config for _target, args in launches)
-    assert [args[3:] for _target, args in launches] == [(3, 5), (5, 7), (7, 9), (9, 10)]
+    assert all(args[2] == "qwen3_vl" for _target, args in launches)
+    assert [args[4:] for _target, args in launches] == [(3, 5), (5, 7), (7, 9), (9, 10)]
 
 
 def test_run_workers_preserves_outputs_on_failure(
@@ -102,7 +132,10 @@ def test_run_workers_preserves_outputs_on_failure(
     qtip_config.hessians.mkdir()
     qtip_config.checkpoints.mkdir()
     (qtip_config.hessians / "3_qkv.pt").touch()
-    monkeypatch.setattr("weight_vq.qtip.pipeline._initialize_run", lambda _config: None)
+    monkeypatch.setattr("weight_vq.qtip.pipeline._model_contract", lambda _model: ("qwen3_vl", 36))
+    monkeypatch.setattr(
+        "weight_vq.qtip.pipeline._initialize_run", lambda _config, _family, _end: None
+    )
 
     class Process:
         exitcode = 4
@@ -148,25 +181,68 @@ def test_qtip_config_is_the_verified_native_recipe() -> None:
     assert "checkpoints" not in recipe
 
 
-class FakeModel:
+class ExportAttention(nn.Module):
     def __init__(self) -> None:
-        self.saved: tuple[Path, dict[str, Any]] | None = None
+        super().__init__()
+        self.q_proj = nn.Linear(1, 1, bias=False)
+        self.k_proj = nn.Linear(1, 1, bias=False)
+        self.v_proj = nn.Linear(1, 1, bias=False)
+        self.o_proj = nn.Linear(1, 1, bias=False)
+
+
+class ExportMlp(nn.Module):
+    def __init__(self) -> None:
+        super().__init__()
+        self.gate_proj = nn.Linear(1, 1, bias=False)
+        self.up_proj = nn.Linear(1, 1, bias=False)
+        self.down_proj = nn.Linear(1, 1, bias=False)
+
+
+class ExportLayer(nn.Module):
+    def __init__(self) -> None:
+        super().__init__()
+        self.self_attn = ExportAttention()
+        self.mlp = ExportMlp()
+
+
+class FakeModel:
+    def __init__(self, family: str) -> None:
+        layers = nn.ModuleList(ExportLayer() for _ in range(10))
+        self.model = (
+            SimpleNamespace(layers=layers)
+            if family == "qwen3"
+            else SimpleNamespace(language_model=SimpleNamespace(layers=layers))
+        )
 
     def eval(self) -> "FakeModel":
         return self
 
-    def save_pretrained(self, path: Path, **kwargs: Any) -> None:
-        self.saved = (path, kwargs)
+    def save_pretrained(self, path: Path, **_kwargs: Any) -> None:
         (path / "model.safetensors").touch()
 
 
-class FakeProcessor:
+class FakeAssets:
+    def __init__(self, filename: str) -> None:
+        self.filename = filename
+
     def save_pretrained(self, path: Path) -> None:
-        (path / "processor_config.json").touch()
+        (path / self.filename).touch()
 
 
-def test_export_uses_standard_hf_model_and_processor_apis(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+@pytest.mark.parametrize(
+    ("family", "model_api", "assets_api", "assets_file"),
+    [
+        ("qwen3", "AutoModelForCausalLM", "AutoTokenizer", "tokenizer_config.json"),
+        ("qwen3_vl", "AutoModelForImageTextToText", "AutoProcessor", "processor_config.json"),
+    ],
+)
+def test_export_uses_family_hf_apis_and_injects_dense_weights(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    family: str,
+    model_api: str,
+    assets_api: str,
+    assets_file: str,
 ) -> None:
     qtip_config = config(tmp_path)
     qtip_config.checkpoints.mkdir()
@@ -175,36 +251,39 @@ def test_export_uses_standard_hf_model_and_processor_apis(
         for name in ("v", "q", "k", "o", "up", "gate", "down"):
             (qtip_config.checkpoints / f"{index}_{name}.pt").touch()
     (qtip_config.checkpoints / "qtip_config.json").write_text("{}")
-    model = FakeModel()
-    model_loads: list[tuple[Path, dict[str, Any]]] = []
-    processor_loads: list[tuple[Path, dict[str, Any]]] = []
+    model = FakeModel(family)
+    model_loads: list[dict[str, Any]] = []
+    assets_loads: list[dict[str, Any]] = []
 
     class AutoModel:
         @staticmethod
-        def from_pretrained(path: Path, **kwargs: Any) -> FakeModel:
-            model_loads.append((path, kwargs))
+        def from_pretrained(_path: Path, **kwargs: Any) -> FakeModel:
+            model_loads.append(kwargs)
             return model
 
-    class AutoProcessor:
+    class AutoAssets:
         @staticmethod
-        def from_pretrained(path: Path, **kwargs: Any) -> FakeProcessor:
-            processor_loads.append((path, kwargs))
-            return FakeProcessor()
+        def from_pretrained(_path: Path, **kwargs: Any) -> FakeAssets:
+            assets_loads.append(kwargs)
+            return FakeAssets(assets_file)
 
-    monkeypatch.setattr("weight_vq.qtip.pipeline.AutoModelForImageTextToText", AutoModel)
-    monkeypatch.setattr("weight_vq.qtip.pipeline.AutoProcessor", AutoProcessor)
-    monkeypatch.setattr("weight_vq.qtip.pipeline.audit_qwen3_vl", lambda _model: {})
+    monkeypatch.setattr("weight_vq.qtip.pipeline._model_contract", lambda _model: (family, 10))
+    monkeypatch.setattr(f"weight_vq.qtip.pipeline.{model_api}", AutoModel)
+    monkeypatch.setattr(f"weight_vq.qtip.pipeline.{assets_api}", AutoAssets)
+    monkeypatch.setattr("weight_vq.qtip.pipeline.torch.load", lambda *_args, **_kwargs: {})
     monkeypatch.setattr(
-        "weight_vq.qtip.pipeline.inject_dense_checkpoints",
-        lambda *_args, **_kwargs: [str(index) for index in range(49)],
+        "weight_vq.qtip.pipeline.reconstruct_dense_weight", lambda _saved, _recipe: torch.ones(1, 1)
     )
 
     export(qtip_config)
 
-    assert model_loads[0][1]["device_map"] == "cpu"
-    assert processor_loads[0][1]["local_files_only"] is True
+    assert model_loads[0]["device_map"] == "cpu"
+    assert assets_loads[0]["local_files_only"] is True
     assert (qtip_config.exported_model / "model.safetensors").is_file()
-    assert (qtip_config.exported_model / "processor_config.json").is_file()
+    assert (qtip_config.exported_model / assets_file).is_file()
+    layers = _get_layers(model, family)  # type: ignore[arg-type]
+    layer = cast(ExportLayer, layers[3])
+    torch.testing.assert_close(layer.self_attn.q_proj.weight, torch.ones(1, 1))
 
 
 class FakeScalar:
@@ -251,8 +330,20 @@ class Layer:
     mlp = SimpleNamespace(up_proj=Projection(), gate_proj=Projection(), down_proj=Projection())
 
 
-def test_validate_loads_image_text_model_and_prints_target_statistics(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+@pytest.mark.parametrize(
+    ("family", "model_api", "layer_prefix"),
+    [
+        ("qwen3", "AutoModelForCausalLM", "model.layers"),
+        ("qwen3_vl", "AutoModelForImageTextToText", "model.language_model.layers"),
+    ],
+)
+def test_validate_uses_family_model_and_prints_target_statistics(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    family: str,
+    model_api: str,
+    layer_prefix: str,
 ) -> None:
     qtip_config = config(tmp_path)
     loads: list[dict[str, Any]] = []
@@ -271,9 +362,10 @@ def test_validate_loads_image_text_model_and_prints_target_statistics(
         FakeScalar(value) for value in values
     ]
     monkeypatch.setattr("weight_vq.qtip.pipeline.torch", fake_torch)
-    monkeypatch.setattr("weight_vq.qtip.pipeline.AutoModelForImageTextToText", AutoModel)
+    monkeypatch.setattr("weight_vq.qtip.pipeline._model_contract", lambda _model: (family, 36))
+    monkeypatch.setattr(f"weight_vq.qtip.pipeline.{model_api}", AutoModel)
     monkeypatch.setattr(
-        "weight_vq.qtip.pipeline.get_layers", lambda _model: [Layer() for _ in range(36)]
+        "weight_vq.qtip.pipeline._get_layers", lambda _model, _family: [Layer() for _ in range(36)]
     )
 
     validate(qtip_config)
@@ -281,7 +373,7 @@ def test_validate_loads_image_text_model_and_prints_target_statistics(
     assert loads[0]["device_map"] == 0
     rows = list(csv.reader(capsys.readouterr().out.splitlines()))
     assert len(rows) == 1 + 7 * 7
-    assert rows[1][0] == "model.language_model.layers.3.self_attn.v_proj"
+    assert rows[1][0] == f"{layer_prefix}.3.self_attn.v_proj"
 
 
 def test_layer_complete_requires_marker_and_all_seven_checkpoints(tmp_path: Path) -> None:
