@@ -2,6 +2,13 @@
 
 从原始 Hugging Face 模型生成 dense QDQ 量化模型的统一流水线。评测不属于本仓库范围。
 
+## 支持列表
+
+| Model                  | Calibration | QTIP | SPHQuant |
+| ---------------------- | ----------- | ---- | -------- |
+| Qwen3-4B-Instruct-2507 | ✅          |      | ✅       |
+| Qwen3-VL-8B-Instruct   | ✅          | ✅   | ✅       |
+
 ## 环境
 
 仓库只使用根目录的 Python 3.11 uv 环境。Torch、Transformers、datasets、QTIP、ParoQuant、Fast Hadamard Transform 和开发工具都安装到 `.venv/`；QTIP 与 ParoQuant 从 `third_party/` editable install。根 `pyproject.toml` 和 `uv.lock` 是唯一的依赖声明与锁文件。
