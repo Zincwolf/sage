@@ -62,11 +62,11 @@ def qtip_arguments(args: argparse.Namespace) -> Namespace:
 def main(argv: list[str] | None = None) -> None:
     args = parser().parse_args(argv)
 
-    import torch  # pyright: ignore[reportMissingImports]
-    from lib import utils  # pyright: ignore[reportMissingImports]
-    from lib.algo import finetune  # pyright: ignore[reportMissingImports]
-    from lib.codebook.bitshift import bitshift_codebook  # pyright: ignore[reportMissingImports]
-    from lib.qwen3_vl.common import (  # pyright: ignore[reportMissingImports]
+    import torch
+    from lib import utils
+    from lib.algo import finetune
+    from lib.codebook.bitshift import bitshift_codebook
+    from lib.qwen3_vl.common import (
         HESSIAN_NAMES,
         atomic_write_completion,
         audit_qwen3_vl,
@@ -77,15 +77,15 @@ def main(argv: list[str] | None = None) -> None:
         projection_paths,
         quant_order,
     )
-    from lib.qwen3_vl.hessian import LayerHessianCollectors  # pyright: ignore[reportMissingImports]
-    from lib.qwen3_vl.replay import (  # pyright: ignore[reportMissingImports]
+    from lib.qwen3_vl.hessian import LayerHessianCollectors
+    from lib.qwen3_vl.replay import (
         MultimodalReconstructionAdapter,
         apply_post_layer_context,
         build_reconstruction_batches,
         capture_split,
         forward_original_layer,
     )
-    from paroquant.optim.util import (  # pyright: ignore[reportMissingImports]
+    from paroquant.optim.util import (
         empty_cache,
         load_model,
     )
@@ -223,7 +223,12 @@ def main(argv: list[str] | None = None) -> None:
         ):
             (args.checkpoints / f"{index}.complete").unlink(missing_ok=True)
             freeze_non_qtip_parameters(layer)
-            if validation is None or validation_outputs is None:
+            if (
+                validation is None
+                or validation_inputs is None
+                or validation_outputs is None
+                or validation_retained_before is None
+            ):
                 raise RuntimeError("quantize requires validation replay batches")
             reconstruction = None
             if args.reconstruction_epochs:

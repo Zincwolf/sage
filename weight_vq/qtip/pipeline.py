@@ -137,7 +137,7 @@ def _initialize_run(config: QTIPConfig) -> None:
     # TLUT; workers only load it and never race through shared /tmp state.
     tlut = config.checkpoints / "tlut-l16-b9-v2.pt"
     if not tlut.is_file():
-        from lib.codebook.bitshift import bitshift_codebook  # pyright: ignore[reportMissingImports]
+        from lib.codebook.bitshift import bitshift_codebook
 
         previous = os.environ.get("QTIP_TLUT_PATH")
         os.environ["QTIP_TLUT_PATH"] = str(tlut)
@@ -251,11 +251,11 @@ def export(config: QTIPConfig) -> None:
     if config.exported_model.exists():
         raise FileExistsError(f"refusing to overwrite {config.exported_model}")
 
-    from lib.qwen3_vl.common import (  # pyright: ignore[reportMissingImports]
+    from lib.qwen3_vl.common import (
         audit_qwen3_vl,
         inject_dense_checkpoints,
     )
-    from transformers import (  # pyright: ignore[reportMissingImports]
+    from transformers import (
         AutoModelForImageTextToText,
         AutoProcessor,
     )
@@ -304,9 +304,9 @@ def export(config: QTIPConfig) -> None:
 def validate(config: QTIPConfig) -> None:
     """Load the dense artifact through the evaluation-facing HF API."""
     start, end = _validate_config(config)
-    import torch  # pyright: ignore[reportMissingImports]
-    from lib.qwen3_vl.common import PROJECTIONS, get_layers  # pyright: ignore[reportMissingImports]
-    from transformers import AutoModelForImageTextToText  # pyright: ignore[reportMissingImports]
+    import torch
+    from lib.qwen3_vl.common import PROJECTIONS, get_layers
+    from transformers import AutoModelForImageTextToText
 
     model = AutoModelForImageTextToText.from_pretrained(
         config.exported_model,

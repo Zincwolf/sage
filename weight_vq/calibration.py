@@ -64,7 +64,7 @@ def _redpajama_split(dataset: Any, split: str) -> Any:
 
 
 def _load_rows(cache: Path, key: str, split: str, seed: int) -> Any:
-    from datasets import load_dataset  # pyright: ignore[reportMissingImports]
+    from datasets import load_dataset
 
     recipe = DATASETS[key]
     source_split = recipe["splits"][split]
@@ -148,8 +148,8 @@ def main(config: CalibrationConfig) -> None:
     if existing and not config.force:
         raise FileExistsError(f"refusing to overwrite existing output: {existing[0]}")
 
-    import torch  # pyright: ignore[reportMissingImports]
-    from transformers import AutoTokenizer  # pyright: ignore[reportMissingImports]
+    import torch
+    from transformers import AutoTokenizer
 
     tokenizer = AutoTokenizer.from_pretrained(
         config.tokenizer.path,

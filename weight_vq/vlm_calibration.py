@@ -31,7 +31,7 @@ def _image_id(item: dict[str, Any]) -> str:
 def _verify_image(path: Path) -> bool:
     if not path.is_file():
         return False
-    from PIL import Image  # pyright: ignore[reportMissingImports]
+    from PIL import Image
 
     try:
         with Image.open(path) as image:
@@ -153,7 +153,7 @@ def main(config: VLMCalibrationConfig) -> None:
     if output.exists() and not config.force:
         raise FileExistsError(f"refusing to overwrite existing output: {output}")
 
-    from huggingface_hub import HfApi, hf_hub_download  # pyright: ignore[reportMissingImports]
+    from huggingface_hub import HfApi, hf_hub_download
 
     resolved_revision = HfApi().dataset_info(REPO_ID, revision=REVISION).sha
     if resolved_revision != REVISION:

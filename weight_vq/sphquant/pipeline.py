@@ -42,8 +42,7 @@ def _physical_device(device: int) -> Generator[None, None, None]:
 
 
 def _model_contract(model: Path) -> tuple[ModelFamily, int]:
-    # Imported here because the root dispatcher environment omits method deps.
-    from transformers import AutoConfig  # pyright: ignore[reportMissingImports]
+    from transformers import AutoConfig
 
     hf_config = AutoConfig.from_pretrained(
         model,
@@ -148,8 +147,7 @@ def optimize(config: SPHQuantConfig) -> None:
     }
 
     with _physical_device(config.device):
-        # Imported here because the root dispatcher environment omits method deps.
-        from paroquant.cli import optimize as pq_opt  # pyright: ignore[reportMissingImports]
+        from paroquant.cli import optimize as pq_opt
 
         # ParoQuant owns optimization semantics; this adapter only supplies Config.
         paroquant_config = pq_opt.Config(**arguments)
@@ -190,8 +188,7 @@ def export(config: SPHQuantConfig) -> None:
     ]
 
     with _physical_device(config.device):
-        # Imported here because the root dispatcher environment omits method deps.
-        from paroquant.cli import convert as converter  # pyright: ignore[reportMissingImports]
+        from paroquant.cli import convert as converter
 
         original_argv = sys.argv
         sys.argv = ["paroquant.cli.convert", *arguments]
@@ -209,8 +206,8 @@ def validate(config: SPHQuantConfig) -> None:
     family, model_layers = _model_contract(config.model)
     target_layers = _target_layers(config, model_layers)
     with _physical_device(config.device):
-        import torch  # pyright: ignore[reportMissingImports]
-        from transformers import (  # pyright: ignore[reportMissingImports]
+        import torch
+        from transformers import (
             AutoModelForCausalLM,
             AutoModelForImageTextToText,
         )
