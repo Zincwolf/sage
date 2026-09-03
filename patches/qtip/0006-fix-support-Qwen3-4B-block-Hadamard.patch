@@ -1,0 +1,105 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Zincwolf <zincwolf@outlook.com>
+Date: Thu, 3 Sep 2026 14:57:43 +0800
+Subject: [PATCH] fix: support Qwen3 4B block Hadamard
+
+---
+ lib/utils/matmul_had.py  | 38 +++++++++++++++++++++++++++++++++++---
+ tests/test_dense_only.py | 10 ++++++++++
+ 2 files changed, 45 insertions(+), 3 deletions(-)
+
+diff --git a/lib/utils/matmul_had.py b/lib/utils/matmul_had.py
+index 2adff6f..9b4f59b 100644
+--- a/lib/utils/matmul_had.py
++++ b/lib/utils/matmul_had.py
+@@ -4,6 +4,7 @@ import torch
+ from lib import utils
+ 
+ torch._dynamo.config.cache_size_limit = 256
++BLOCK_HADAMARD_SIZE = 512
+ 
+ 
+ def get_hadK(n, transpose=False):
+@@ -57,8 +58,12 @@ def get_hadK(n, transpose=False):
+         K = 12
+         hadK = get_had12().T if transpose else get_had12()
+     else:
+-        assert (is_pow2(n))
+-        K = 1
++        if is_pow2(n):
++            K = 1
++        elif n % BLOCK_HADAMARD_SIZE == 0:
++            K = -BLOCK_HADAMARD_SIZE
++        else:
++            raise ValueError(f"Unsupported Hadamard dimension: {n}")
+ 
+     return hadK, K
+ 
+@@ -66,6 +71,12 @@ def get_hadK(n, transpose=False):
+ def matmul_hadU(X, transpose=False):
+     n = X.shape[-1]
+     hadK, K = get_hadK(n, transpose)
++    if K < 0:
++        block_size = -K
++        blocks = X.contiguous().reshape(*X.shape[:-1], n // block_size, block_size)
++        return torch.ops.hadamard.hadamard(
++            blocks, block_size ** -0.5
++        ).reshape(X.shape)
+     input = X.clone().view(-1, n, 1)
+     output = input.clone()
+     while input.shape[1] > K:
+@@ -99,11 +110,32 @@ def hadamard_abstract(x: torch.Tensor, scale: float) -> torch.Tensor:
+ 
+ @torch.library.impl("hadamard::hadamard", "default")
+ def hadamard(x: torch.Tensor, scale: float) -> torch.Tensor:
+-    return fast_hadamard_transform.hadamard_transform(x, scale)
++    if x.is_cuda:
++        return fast_hadamard_transform.hadamard_transform(x, scale)
++    size = x.shape[-1]
++    if not is_pow2(size):
++        raise RuntimeError(f"Hadamard fallback requires power-of-two, got {size}")
++    output = x.contiguous()
++    width = 1
++    while width < size:
++        blocks = output.reshape(*output.shape[:-1], -1, 2, width)
++        left = blocks[..., 0, :].clone()
++        right = blocks[..., 1, :].clone()
++        output = torch.stack((left + right, left - right), dim=-2).reshape(
++            output.shape
++        )
++        width *= 2
++    return output * scale
+ 
+ 
+ def matmul_hadU_cuda(X, hadK, K, transpose=False):
+     n = X.shape[-1]
++    if K < 0:
++        block_size = -K
++        blocks = X.contiguous().reshape(*X.shape[:-1], n // block_size, block_size)
++        return torch.ops.hadamard.hadamard(
++            blocks, block_size ** -0.5
++        ).reshape(X.shape)
+     if K == 1:
+         return torch.ops.hadamard.hadamard(X.contiguous(), n**(-0.5))
+ 
+diff --git a/tests/test_dense_only.py b/tests/test_dense_only.py
+index 75cbe80..5557f9c 100644
+--- a/tests/test_dense_only.py
++++ b/tests/test_dense_only.py
+@@ -76,6 +76,16 @@ def test_ldlq_runs_without_packed_cuda_kernels():
+     assert torch.isfinite(reconstructed).all()
+ 
+ 
++def test_qwen3_4b_mlp_dimension_uses_block_hadamard():
++    from lib.utils.matmul_had import get_hadK, matmul_hadU
++
++    assert get_hadK(9728) == (None, -512)
++    values = torch.randn(2, 9728)
++    transformed = matmul_hadU(values)
++    assert not torch.equal(transformed, values)
++    torch.testing.assert_close(matmul_hadU(transformed), values, atol=1e-4, rtol=1e-4)
++
++
+ def test_quantlut_sym_uses_explicit_tlut_path(monkeypatch, tmp_path):
+     from lib.codebook.bitshift import bitshift_codebook
+ 
