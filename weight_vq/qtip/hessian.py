@@ -8,6 +8,8 @@ from typing import cast
 import torch
 from torch import nn
 
+from weight_vq.qtip.distributed import DistributedContext
+
 
 class MaskedHessianCollector:
     """Accumulate E[x x.T] over valid sequence positions."""
@@ -48,18 +50,24 @@ class MaskedHessianCollector:
         self.matrix.addmm_(flattened.T, flattened)
         self.count += flattened.shape[0]
 
-    def close(self) -> dict[str, torch.Tensor | int | str]:
+    def close(
+        self, distributed: DistributedContext | None = None
+    ) -> dict[str, torch.Tensor | int | str]:
         self._handle.remove()
         if self.count == 0:
             raise RuntimeError("Hessian collector observed no valid inputs")
-        matrix = (self.matrix / self.count).cpu()
+        count = self.count
+        if distributed is not None:
+            distributed.sum_(self.matrix)
+            count = int(distributed.global_count(count))
+        matrix = (self.matrix / count).cpu()
         rows, columns = torch.tril_indices(self.size, self.size)
         flattened = matrix[rows, columns].contiguous()
         self.matrix = torch.empty(0)
         return {
             "flatH": flattened,
             "n": self.size,
-            "ct": self.count,
+            "ct": count,
             "position_mask": "all" if self.include_padding else "attention_mask",
         }
 
@@ -84,5 +92,7 @@ class LayerHessianCollectors:
         for collector in self.collectors.values():
             collector.set_position_mask(mask)
 
-    def close(self) -> dict[str, dict[str, torch.Tensor | int | str]]:
-        return {name: collector.close() for name, collector in self.collectors.items()}
+    def close(
+        self, distributed: DistributedContext | None = None
+    ) -> dict[str, dict[str, torch.Tensor | int | str]]:
+        return {name: collector.close(distributed) for name, collector in self.collectors.items()}

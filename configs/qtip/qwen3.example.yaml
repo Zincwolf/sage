@@ -5,7 +5,7 @@ hessians: outputs/qtip/qwen3/hessians
 checkpoints: outputs/qtip/qwen3/checkpoints
 exported_model: outputs/qtip/qwen3/hf-dense-qdq
 
-# Multiple physical CUDA indices receive contiguous layer ranges.
+# Every selected GPU processes a rank-local slice of each global batch.
 devices: [0, 1, 2, 3]
 seed: 0
 layer_start: 0
@@ -14,10 +14,11 @@ num_cpu_threads: 8
 model_dtype: bfloat16
 
 # Verified Qwen3 token calibration protocol: 1920 train and 128 validation
-# sequences of 2048 tokens. Replay batch size 1 bounds eager-attention memory.
+# sequences of 2048 tokens. The configured global replay batch size is 16.
 train_samples: 1920
 validation_samples: 128
-batch_size: 1
+batch_size: 16
+replay_device: cuda
 include_padding_in_hessian: false
 
 # Verified W2 bitshift trellis recipe.

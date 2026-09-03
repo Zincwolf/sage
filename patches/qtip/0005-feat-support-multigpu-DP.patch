@@ -1,0 +1,454 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Zincwolf <zincwolf@outlook.com>
+Date: Thu, 3 Sep 2026 13:59:41 +0800
+Subject: [PATCH] feat: support multigpu DP
+
+---
+ lib/algo/finetune.py     | 216 ++++++++++++++++++++++++---------------
+ tests/test_dense_only.py | 140 +++++++++++++++++++++++++
+ 2 files changed, 271 insertions(+), 85 deletions(-)
+
+diff --git a/lib/algo/finetune.py b/lib/algo/finetune.py
+index fa00cf4..2ebdfc4 100644
+--- a/lib/algo/finetune.py
++++ b/lib/algo/finetune.py
+@@ -129,7 +129,11 @@ def finetune_decoder_layer(layer, name, device, train_dl, valid_dl, orig_dtype,
+ 
+ def quantize_finetune_decoder_layer(mixed_layer, quant_order, idx, cb, args,
+                                     device, pre_orig_emb, orig_emb,
+-                                    reconstruction_adapter=None):
++                                    reconstruction_adapter=None,
++                                    reconstruction_callback=None,
++                                    resume_state=None,
++                                    progress_callback=None,
++                                    write_checkpoints=True):
+     torch.manual_seed(getattr(args, 'seed', 0) + idx)
+     torch.set_num_threads(args.num_cpu_threads)
+     torch.set_grad_enabled(False)
+@@ -142,7 +146,7 @@ def quantize_finetune_decoder_layer(mixed_layer, quant_order, idx, cb, args,
+     mixed_layer = mixed_layer.float()
+ 
+     if args.reconstruction_epochs > 0:
+-        if reconstruction_adapter is None:
++        if reconstruction_adapter is None and reconstruction_callback is None:
+             train_dl, valid_dl = utils.split_data(
+                 pre_orig_emb, orig_emb, args)
+         else:
+@@ -153,9 +157,102 @@ def quantize_finetune_decoder_layer(mixed_layer, quant_order, idx, cb, args,
+     has_kernel = (args.packed_inference_kernel
+                   and utils.has_kernel(args.decode_mode, args.L, args.K, args.V,
+                                        args.tlut_bits, args.td_x, args.td_y))
++    completed = 0 if resume_state is None else resume_state['completed']
++    projection_payloads = (
++        {} if resume_state is None else dict(resume_state['projections']))
++
++    def build_quantized_linear(payload, m, n):
++        quant_linear = QuantizedLinear(
++            n,
++            m,
++            args.td_x,
++            args.td_y,
++            args.L,
++            args.K,
++            args.V,
++            args.tlut_bits,
++            args.decode_mode,
++            mode='train-recons' if args.train_lut else 'train-fixW',
++            dtype=orig_dtype,
++            grad_ckpt=args.gradient_checkpointing)
++        quant_linear.has_kernel = has_kernel
++        quant_linear.trellis.copy_(payload['trellis'])
++        quant_linear.SU.copy_(payload['SU'])
++        quant_linear.SV.copy_(payload['SV'])
++        quant_linear.rcp.copy_(payload['rcp'])
++        quant_linear.tp_rank.copy_(payload['tp_rank'])
++        quant_linear = quant_linear.to(device).float()
++        Wscale = payload['Wscale'].to(device)
++
++        if args.split_for_tp and payload['rcp'] == 1:
++            quant_linear.SU = nn.Parameter(
++                (quant_linear.SU.reshape(args.tp_rank, -1) *
++                 Wscale.unsqueeze(-1)).reshape(quant_linear.SU.shape),
++                requires_grad=True)
++            quant_linear.SV = nn.Parameter(quant_linear.SV,
++                                           requires_grad=True)
++        elif args.split_for_tp and payload['rcp'] == 2:
++            quant_linear.SU = nn.Parameter(quant_linear.SU,
++                                           requires_grad=True)
++            quant_linear.SV = nn.Parameter(
++                (quant_linear.SV.reshape(args.tp_rank, -1) *
++                 Wscale.unsqueeze(-1)).reshape(quant_linear.SV.shape),
++                requires_grad=True)
++        else:
++            quant_linear.SU = nn.Parameter(quant_linear.SU,
++                                           requires_grad=True)
++            quant_linear.SV = nn.Parameter(quant_linear.SV * Wscale,
++                                           requires_grad=True)
++
++        if quant_linear.tlut is not None and payload['tlut'] is not None:
++            quant_linear.tlut.copy_(payload['tlut'])
++            quant_linear.tlut.requires_grad = args.train_lut
++        return quant_linear
++
++    def refresh_payloads(limit):
++        for linear_attr, name, _ih, _oh, rcp in quant_order[:limit]:
++            quant_linear = attrgetter(linear_attr)(mixed_layer)
++            data = dict(projection_payloads[name])
++            if args.split_for_tp and rcp == 'row':
++                data['SU'] = (
++                    ((quant_linear.SU.data).reshape(args.tp_rank, -1) /
++                     data['Wscale'].to(
++                         quant_linear.SU.device).unsqueeze(-1)).reshape(
++                             quant_linear.SU.data.shape)).to(orig_dtype).cpu()
++                data['SV'] = quant_linear.SV.data.to(orig_dtype).cpu()
++            elif args.split_for_tp and rcp == 'col':
++                data['SU'] = quant_linear.SU.data.to(orig_dtype).cpu()
++                data['SV'] = (
++                    ((quant_linear.SV.data).reshape(args.tp_rank, -1) /
++                     data['Wscale'].to(
++                         quant_linear.SV.device).unsqueeze(-1)).reshape(
++                             quant_linear.SV.data.shape)).to(orig_dtype).cpu()
++            else:
++                data['SU'] = quant_linear.SU.data.to(orig_dtype).cpu()
++                data['SV'] = (quant_linear.SV.data / data['Wscale'].to(
++                    quant_linear.SV.device)).to(orig_dtype).cpu()
++            if quant_linear.tlut is not None:
++                data['tlut'] = quant_linear.tlut.data.to(orig_dtype).cpu()
++            projection_payloads[name] = data
++
++    for linear_attr, name, _ih, _oh, _rcp in quant_order[:completed]:
++        original_linear = attrgetter(linear_attr)(mixed_layer)
++        m, n = original_linear.weight.shape
++        torch.randn(n, device=device)
++        torch.randn(m, device=device)
++        if args.reconstruction_epochs > 0:
++            split_attr = linear_attr.split('.')
++            setattr(
++                attrgetter('.'.join(split_attr[:-1]))(mixed_layer),
++                split_attr[-1],
++                build_quantized_linear(projection_payloads[name], m, n))
++    if completed and args.reconstruction_epochs > 0:
++        mixed_layer = mixed_layer.cpu()
+ 
+     for quant_i, (linear_attr, name, in_hess_name, out_hess_name,
+                   rcp) in enumerate(quant_order):
++        if quant_i < completed:
++            continue
+         utils.clean()
+         cb = cb.to(device).to(orig_dtype)
+         orig_linear = attrgetter(linear_attr)(mixed_layer)
+@@ -292,8 +389,6 @@ def quantize_finetune_decoder_layer(mixed_layer, quant_order, idx, cb, args,
+             f'{idx}_{name} proxy err {err.item()} tr(WHW.T) {torch.trace(Wr @ HRr @ Wr.T)}'
+         )
+         
+-        save_path = f'{args.checkpoints}/{idx}_{name}.pt'
+-
+         # 0 = no tensor parallelism, 1 = row parallel, 2 = column parallel
+         rcp_int = 0
+         if args.split_for_tp:
+@@ -303,7 +398,7 @@ def quantize_finetune_decoder_layer(mixed_layer, quant_order, idx, cb, args,
+             'trellis': packed.cpu(),
+             'SU': SU.to(orig_dtype).cpu(),
+             'SV': SV.to(orig_dtype).cpu(),
+-            'Wscale': Wscale,
++            'Wscale': Wscale.cpu(),
+             'proxy_err': err.item(),
+             'transformed_hessian_jitter': transformed_hessian_jitter,
+             'tlut': (
+@@ -313,62 +408,23 @@ def quantize_finetune_decoder_layer(mixed_layer, quant_order, idx, cb, args,
+             'rcp': rcp_int,
+             'tp_rank': args.tp_rank,
+         }
+-        atomic_torch_save(payload, save_path)
+-
++        projection_payloads[name] = payload
+ 
+         del HRr, Wr, hatWr, LRr, Qidxs
+         utils.clean()
+ 
+         if args.reconstruction_epochs == 0:
++            if progress_callback is not None:
++                progress_callback(quant_i + 1, projection_payloads)
+             del packed, SU, SV, Wscale
+             cb = cb.cpu()
+             utils.clean()
+             continue
+         
+-        q_linear = QuantizedLinear(
+-            n,
+-            m,
+-            args.td_x,
+-            args.td_y,
+-            args.L,
+-            args.K,
+-            args.V,
+-            args.tlut_bits,
+-            args.decode_mode,
+-            mode='train-recons' if args.train_lut else 'train-fixW',
+-            dtype=orig_dtype,
+-            grad_ckpt=args.gradient_checkpointing)
+-        q_linear.has_kernel = has_kernel
+-        q_linear.trellis.copy_(packed)
+-        q_linear.SU.copy_(SU)
+-        q_linear.SV.copy_(SV)
+-        q_linear.rcp.copy_(rcp_int)
+-        q_linear.tp_rank.copy_(args.tp_rank)
+-        q_linear = q_linear.to(device).float()
++        q_linear = build_quantized_linear(payload, m, n)
+ 
+         del packed, SU, SV
+         utils.clean()
+-        
+-        if args.split_for_tp and rcp == 'row':
+-            q_linear.SU = nn.Parameter(
+-                (q_linear.SU.reshape(args.tp_rank, -1) *
+-                 Wscale.unsqueeze(-1)).reshape(q_linear.SU.shape),
+-                requires_grad=True)
+-            q_linear.SV = nn.Parameter(q_linear.SV, requires_grad=True)
+-        elif args.split_for_tp and rcp == 'col':
+-            q_linear.SU = nn.Parameter(q_linear.SU, requires_grad=True)
+-            q_linear.SV = nn.Parameter(
+-                (q_linear.SV.reshape(args.tp_rank, -1) *
+-                 Wscale.unsqueeze(-1)).reshape(q_linear.SV.shape),
+-                requires_grad=True)
+-        else:
+-            q_linear.SU = nn.Parameter(q_linear.SU, requires_grad=True)
+-            q_linear.SV = nn.Parameter(q_linear.SV * Wscale,
+-                                       requires_grad=True)
+-
+-        if q_linear.tlut is not None:
+-            q_linear.tlut.copy_(cb.tlut.data)
+-            q_linear.tlut.requires_grad = args.train_lut
+ 
+         split_attr = linear_attr.split('.')
+         setattr(
+@@ -376,54 +432,44 @@ def quantize_finetune_decoder_layer(mixed_layer, quant_order, idx, cb, args,
+             q_linear)
+ 
+         with torch.enable_grad():
+-            finetune_decoder_layer(
+-                mixed_layer,
+-                f'{idx}_{name}',
+-                device,
+-                train_dl,
+-                valid_dl,
+-                orig_dtype,
+-                args,
+-                reconstruction_adapter,
+-            )
+-
++            if reconstruction_callback is None:
++                finetune_decoder_layer(
++                    mixed_layer,
++                    f'{idx}_{name}',
++                    device,
++                    train_dl,
++                    valid_dl,
++                    orig_dtype,
++                    args,
++                    reconstruction_adapter,
++                )
++            else:
++                reconstruction_callback(mixed_layer, f'{idx}_{name}',
++                                        orig_dtype)
++        refresh_payloads(quant_i + 1)
++        if progress_callback is not None:
++            progress_callback(quant_i + 1, projection_payloads)
+         cb = cb.cpu()
+         utils.clean()
+ 
+     if args.reconstruction_epochs == 0:
++        if write_checkpoints:
++            for _linear_attr, name, _ih, _oh, _rcp in quant_order:
++                atomic_torch_save(
++                    projection_payloads[name],
++                    f'{args.checkpoints}/{idx}_{name}.pt')
+         mixed_layer = mixed_layer.to(orig_dtype).cpu()
+         utils.clean()
+         torch.set_grad_enabled(False)
+         return
+ 
+-    for quant_i, (linear_attr, name, in_hess_name, out_hess_name,
+-                  rcp) in enumerate(quant_order):
+-        quant_linear = attrgetter(linear_attr)(mixed_layer)
+-        save_path = f'{args.checkpoints}/{idx}_{name}.pt'
+-        data = torch.load(save_path, weights_only=True)
+-        if args.split_for_tp and rcp == 'row':
+-            data['SU'] = (
+-                ((quant_linear.SU.data).reshape(args.tp_rank, -1) /
+-                 data['Wscale'].to(quant_linear.SU.device).unsqueeze(-1)
+-                 ).reshape(quant_linear.SU.data.shape)).to(orig_dtype).cpu()
+-            data['SV'] = quant_linear.SV.data.to(orig_dtype).cpu()
+-        elif args.split_for_tp and rcp == 'col':
+-            data['SU'] = quant_linear.SU.data.to(orig_dtype).cpu()
+-            data['SV'] = (
+-                ((quant_linear.SV.data).reshape(args.tp_rank, -1) /
+-                 data['Wscale'].to(quant_linear.SV.device).unsqueeze(-1)
+-                 ).reshape(quant_linear.SV.data.shape)).to(orig_dtype).cpu()
+-        else:
+-            data['SU'] = quant_linear.SU.data.to(orig_dtype).cpu()
+-            data['SV'] = (quant_linear.SV.data / data['Wscale'].to(
+-                quant_linear.SV.device)).to(orig_dtype).cpu()
+-
+-        if quant_linear.tlut is not None:
+-            data['tlut'] = quant_linear.tlut.data.to(orig_dtype).cpu()
+-        atomic_torch_save(data, save_path)
++    refresh_payloads(len(quant_order))
++    if write_checkpoints:
++        for _linear_attr, name, _ih, _oh, _rcp in quant_order:
++            atomic_torch_save(
++                projection_payloads[name], f'{args.checkpoints}/{idx}_{name}.pt')
+ 
+     mixed_layer = mixed_layer.to(orig_dtype).cpu()
+-
+     utils.clean()
+     torch.set_grad_enabled(False)
+ 
+diff --git a/tests/test_dense_only.py b/tests/test_dense_only.py
+index b125967..75cbe80 100644
+--- a/tests/test_dense_only.py
++++ b/tests/test_dense_only.py
+@@ -186,3 +186,143 @@ def test_quantize_recovers_transformed_hessian_without_tp_reshape(
+     assert checkpoint["transformed_hessian_jitter"] == 1e-2
+     assert checkpoint["rcp"] == 0
+     assert kernel_modes == [False]
++
++
++def test_projection_resume_matches_uninterrupted_quantization(monkeypatch, tmp_path):
++    from lib.algo import finetune
++
++    class Layer(torch.nn.Module):
++        def __init__(self):
++            super().__init__()
++            self.block = torch.nn.Module()
++            self.block.first = torch.nn.Linear(4, 4, bias=False)
++            self.block.second = torch.nn.Linear(4, 4, bias=False)
++
++    class Codebook:
++        lut = torch.ones(2)
++
++        def to(self, *_args):
++            return self
++
++        def cpu(self):
++            return self
++
++        def pack_trellis(self, trellis):
++            return trellis[:, :1].to(torch.int16)
++
++    lower = torch.tril_indices(4, 4)
++    hessian = torch.eye(4)
++    for name in ("first", "second"):
++        torch.save(
++            {"flatH": hessian[lower[0], lower[1]], "n": 4},
++            tmp_path / f"0_{name}.pt",
++        )
++    monkeypatch.setattr(finetune.utils, "matmul_hadUt", lambda value: value)
++    monkeypatch.setattr(finetune.utils, "has_kernel", lambda *_args: False)
++    monkeypatch.setattr(
++        finetune.ldlq,
++        "LDLQ",
++        lambda weight, _factor, _codebook, _args, **_kwargs: (
++            weight.clone(),
++            torch.zeros((4, 2), dtype=torch.int64),
++        ),
++    )
++    args = SimpleNamespace(
++        seed=23,
++        num_cpu_threads=torch.get_num_threads(),
++        use_fp64=False,
++        reconstruction_epochs=1,
++        gradient_checkpointing=False,
++        train_lut=False,
++        decode_mode="quantlut_sym",
++        L=4,
++        K=1,
++        V=2,
++        tlut_bits=3,
++        td_x=2,
++        td_y=2,
++        packed_inference_kernel=False,
++        split_for_tp=False,
++        tp_rank=8,
++        hessians=tmp_path,
++        checkpoints=tmp_path / "full",
++        sigma_reg=1e-2,
++        scale_override=1.0,
++    )
++    args.checkpoints.mkdir()
++    quant_order = (
++        ("block.first", "first", "first", "unused", "row"),
++        ("block.second", "second", "second", "unused", "row"),
++    )
++    initial = Layer().state_dict()
++    interrupted_state = None
++
++    def interrupt(completed, projections):
++        nonlocal interrupted_state
++        interrupted_state = {"completed": completed, "projections": projections}
++        raise InterruptedError
++
++    def reconstruct(layer, _name, _dtype):
++        with torch.no_grad():
++            for module in layer.modules():
++                if hasattr(module, "SU"):
++                    module.SU.add_(0.25)
++                    module.SV.add_(0.5)
++
++    grad_enabled = torch.is_grad_enabled()
++    try:
++        full = Layer()
++        full.load_state_dict(initial)
++        finetune.quantize_finetune_decoder_layer(
++            full,
++            quant_order,
++            0,
++            Codebook(),
++            args,
++            torch.device("cpu"),
++            None,
++            None,
++            reconstruction_callback=reconstruct,
++        )
++
++        interrupted = Layer()
++        interrupted.load_state_dict(initial)
++        with pytest.raises(InterruptedError):
++            finetune.quantize_finetune_decoder_layer(
++                interrupted,
++                quant_order,
++                0,
++                Codebook(),
++                args,
++                torch.device("cpu"),
++                None,
++                None,
++                progress_callback=interrupt,
++                reconstruction_callback=reconstruct,
++                write_checkpoints=False,
++            )
++
++        args.checkpoints = tmp_path / "resumed"
++        args.checkpoints.mkdir()
++        resumed = Layer()
++        resumed.load_state_dict(initial)
++        finetune.quantize_finetune_decoder_layer(
++            resumed,
++            quant_order,
++            0,
++            Codebook(),
++            args,
++            torch.device("cpu"),
++            None,
++            None,
++            resume_state=interrupted_state,
++            reconstruction_callback=reconstruct,
++        )
++    finally:
++        torch.set_grad_enabled(grad_enabled)
++
++    for name in ("first", "second"):
++        full_payload = torch.load(tmp_path / "full" / f"0_{name}.pt", weights_only=True)
++        resumed_payload = torch.load(tmp_path / "resumed" / f"0_{name}.pt", weights_only=True)
++        for key in ("trellis", "SU", "SV", "Wscale"):
++            torch.testing.assert_close(resumed_payload[key], full_payload[key])

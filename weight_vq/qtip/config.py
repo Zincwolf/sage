@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass
 from pathlib import Path
+from typing import Literal
 
 
 @dataclass(frozen=True)
@@ -26,6 +27,7 @@ class QTIPConfig:
     train_samples: int = 512
     validation_samples: int = 128
     batch_size: int = 16
+    replay_device: Literal["cpu", "cuda"] = "cuda"
     include_padding_in_hessian: bool = False
 
     td_x: int = 16
@@ -62,13 +64,16 @@ class QTIPConfig:
             "checkpoints",
             "exported_model",
             "devices",
+            "batch_size",
+            "replay_device",
+            "num_cpu_threads",
             "layer_start",
             "layer_end",
         ):
             payload.pop(name)
         payload["layer_range"] = [self.layer_start, layer_end]
         return {
-            "schema_version": 2,
+            "schema_version": 3,
             "format": f"qtip-bitshift-trellis-{model_family.replace('_', '-')}-dense-qdq",
             "model_family": model_family,
             **payload,

@@ -4,10 +4,10 @@ from __future__ import annotations
 
 import csv
 import json
-import multiprocessing
 import os
 import shutil
 import sys
+import tempfile
 from operator import attrgetter
 from pathlib import Path
 from typing import Any, Literal, cast
@@ -16,6 +16,7 @@ import torch
 from lib.algo import finetune
 from lib.codebook.bitshift import bitshift_codebook
 from torch import nn
+from torch.multiprocessing.spawn import spawn
 from transformers import (
     AutoConfig,
     AutoModelForCausalLM,
@@ -35,14 +36,18 @@ from weight_vq.qtip.artifacts import (
     reconstruct_dense_weight,
 )
 from weight_vq.qtip.config import QTIPConfig
+from weight_vq.qtip.distributed import process_group
+from weight_vq.qtip.calibration import local_batch_slice
 from weight_vq.qtip.hessian import LayerHessianCollectors
-from weight_vq.qtip.replay import ReconstructionAdapter, capture_replay
+from weight_vq.qtip.reconstruction import DistributedReconstruction
+from weight_vq.qtip.replay import LayerReplay, capture_replay
 
 Stage = Literal["hessian", "quantize"]
 ModelFamily = Literal["qwen3", "qwen3_vl"]
 
 
 def _model_contract(model: Path) -> tuple[ModelFamily, int]:
+    """Return model family and number of hidden layers."""
     hf_config = AutoConfig.from_pretrained(model, local_files_only=True, trust_remote_code=True)
     if hf_config.model_type == "qwen3":
         return "qwen3", int(hf_config.num_hidden_layers)
@@ -60,20 +65,6 @@ def _get_layers(model: nn.Module, family: ModelFamily) -> nn.ModuleList:
 def layer_range(config: QTIPConfig, model_layers: int) -> tuple[int, int]:
     end = model_layers if config.layer_end is None else config.layer_end
     return config.layer_start, end
-
-
-def split_layer_ranges(start: int, end: int, devices: list[int]) -> list[tuple[int, int, int]]:
-    if not devices:
-        raise ValueError("devices must contain at least one CUDA device")
-    worker_count = min(len(devices), end - start)
-    width, remainder = divmod(end - start, worker_count)
-    ranges = []
-    cursor = start
-    for worker_index, device in enumerate(devices[:worker_count]):
-        next_cursor = cursor + width + (worker_index < remainder)
-        ranges.append((device, cursor, next_cursor))
-        cursor = next_cursor
-    return ranges
 
 
 def _tlut_path(config: QTIPConfig) -> Path:
@@ -107,144 +98,197 @@ def _initialize_run(config: QTIPConfig, family: ModelFamily, end: int) -> None:
         )
 
 
-def _run_shard(
+def _run_rank(
+    rank: int,
     config: QTIPConfig,
     stage: Stage,
     family: ModelFamily,
-    physical_device: int,
     start: int,
     end: int,
+    rendezvous: Path,
 ) -> None:
     if not torch.cuda.is_available():
         raise RuntimeError("QTIP hessian and quantize stages require CUDA")
+
+    with process_group(rank, config.devices, rendezvous) as distributed:
+        torch.manual_seed(config.seed)
+        torch.cuda.manual_seed(config.seed)
+        dtype = cast(torch.dtype, getattr(torch, config.model_dtype))
+        codebook = bitshift_codebook(
+            L=config.L,
+            K=config.K,
+            V=config.V,
+            tlut_bits=config.tlut_bits,
+            decode_mode=config.decode_mode,
+            tlut_path=_tlut_path(config),
+        )
+        model_loader = AutoModelForCausalLM if family == "qwen3" else AutoModelForImageTextToText
+        # TODO: Share CPU teacher weights across ranks after validating VLM serialization.
+        # I think /dev/shm is large enough for many machines to store a full teacher model.
+        model = cast(
+            nn.Module,
+            model_loader.from_pretrained(
+                config.model,
+                device_map="cpu",
+                dtype=dtype,
+                low_cpu_mem_usage=True,
+                local_files_only=True,
+                trust_remote_code=True,
+                attn_implementation="eager",
+            ),
+        ).eval()
+        layers = _get_layers(model, family)
+        train = capture_replay(
+            model,
+            config,
+            family=family,
+            split="train",
+            device=distributed.device,
+            rank=rank,
+            world_size=distributed.world_size,
+        )
+        validation = (
+            capture_replay(
+                model,
+                config,
+                family=family,
+                split="validation",
+                device=distributed.device,
+                rank=rank,
+                world_size=distributed.world_size,
+            )
+            if stage == "quantize" and config.reconstruction_epochs
+            else None
+        )
+        utils.clear_cuda_cache()
+
+        for index in range(end):
+            layer = layers[index].to(distributed.device).eval()
+            selected = start <= index < end
+            collectors = (
+                LayerHessianCollectors(layer, include_padding=config.include_padding_in_hessian)
+                if stage == "hessian" and selected and not hessian_complete(index, config.hessians)
+                else None
+            )
+            quantizing = (
+                stage == "quantize" and selected and not layer_complete(index, config.checkpoints)
+            )
+            retain_layer = quantizing and config.reconstruction_epochs > 0
+            train_layer = train.forward_original(
+                layer,
+                index,
+                device=distributed.device,
+                collectors=collectors,
+                autocast_dtype=dtype,
+                retain_layer=retain_layer,
+            )
+            if collectors is not None:
+                payloads = collectors.close(distributed)
+                if distributed.is_primary:
+                    for name, payload in payloads.items():
+                        utils.atomic_torch_save(payload, config.hessians / f"{index}_{name}.pt")
+                distributed.barrier()
+                del payloads
+                utils.clear_cuda_cache()
+            del collectors
+
+            validation_layer = (
+                validation.forward_original(
+                    layer,
+                    index,
+                    device=distributed.device,
+                    autocast_dtype=dtype,
+                    retain_layer=retain_layer,
+                )
+                if validation is not None
+                else None
+            )
+            if quantizing:
+                if distributed.is_primary:
+                    (config.checkpoints / f"{index}.complete").unlink(missing_ok=True)
+                for parameter in layer.parameters():
+                    parameter.requires_grad_(False)
+                resume_path = config.checkpoints / f"{index}.resume.pt"
+                resume_state = (
+                    torch.load(resume_path, map_location="cpu", weights_only=True)
+                    if resume_path.is_file()
+                    else None
+                )
+
+                def save_progress(
+                    completed: int, projections: dict[str, dict[str, Any]], path: Path = resume_path
+                ) -> None:
+                    if distributed.is_primary:
+                        utils.atomic_torch_save(
+                            {"completed": completed, "projections": projections}, path
+                        )
+                    distributed.barrier()
+
+                reconstruction = (
+                    DistributedReconstruction(
+                        train=cast(LayerReplay, train_layer),
+                        validation=cast(LayerReplay, validation_layer),
+                        config=config,
+                        distributed=distributed,
+                        seed=config.seed + index,
+                    )
+                    if validation_layer is not None
+                    else None
+                )
+                finetune.quantize_finetune_decoder_layer(
+                    layer,
+                    quant_order(),
+                    index,
+                    codebook,
+                    config,
+                    distributed.device,
+                    None,
+                    None,
+                    reconstruction_callback=reconstruction,
+                    resume_state=resume_state,
+                    progress_callback=save_progress,
+                    write_checkpoints=distributed.is_primary,
+                )
+                if distributed.is_primary:
+                    missing = [
+                        path
+                        for path in projection_paths(index, config.checkpoints)
+                        if not path.is_file()
+                    ]
+                    if missing:
+                        raise RuntimeError(f"layer {index} missing checkpoints: {missing}")
+                    resume_path.unlink(missing_ok=True)
+                    atomic_write_completion(index, config.checkpoints)
+                distributed.barrier()
+                del reconstruction, resume_state
+
+            del train_layer, validation_layer
+            layers[index] = nn.Identity()
+            del layer
+            utils.clear_cuda_cache()
+
+
+def _run_workers(config: QTIPConfig, stage: Stage) -> None:
+    family, model_layers = _model_contract(config.model)
+    start, end = layer_range(config, model_layers)
+    if not config.devices:
+        raise ValueError("devices must contain at least one CUDA device")
+    local_batch_slice(config.batch_size, 0, len(config.devices))
     if stage == "quantize":
         missing = [
             index for index in range(start, end) if not hessian_complete(index, config.hessians)
         ]
         if missing:
             raise FileNotFoundError(f"missing QTIP Hessians for layers: {missing}")
-
-    torch.manual_seed(config.seed)
-    device = torch.device(f"cuda:{physical_device}")
-    torch.cuda.set_device(device)
-    torch.cuda.manual_seed(config.seed)
-    dtype = cast(torch.dtype, getattr(torch, config.model_dtype))
-    codebook = bitshift_codebook(
-        L=config.L,
-        K=config.K,
-        V=config.V,
-        tlut_bits=config.tlut_bits,
-        decode_mode=config.decode_mode,
-        tlut_path=_tlut_path(config),
-    )
-    model_loader = AutoModelForCausalLM if family == "qwen3" else AutoModelForImageTextToText
-    model = cast(
-        nn.Module,
-        model_loader.from_pretrained(
-            config.model,
-            device_map="cpu",
-            dtype=dtype,
-            low_cpu_mem_usage=True,
-            local_files_only=True,
-            trust_remote_code=True,
-            attn_implementation="eager",
-        ),
-    ).eval()
-    layers = _get_layers(model, family)
-    model.to(device)
-    train = capture_replay(model, layers, config, family=family, split="train", device=device)
-    validation = (
-        capture_replay(model, layers, config, family=family, split="validation", device=device)
-        if stage == "quantize" and config.reconstruction_epochs
-        else None
-    )
-    model.cpu()
-    utils.clear_cuda_cache()
-
-    for index in range(end):
-        layer = layers[index].to(device).eval()
-        selected = start <= index < end
-        collectors = (
-            LayerHessianCollectors(layer, include_padding=config.include_padding_in_hessian)
-            if stage == "hessian" and selected and not hessian_complete(index, config.hessians)
-            else None
-        )
-        train_layer = train.forward_original(
-            layer, index, device=device, collectors=collectors, autocast_dtype=dtype
-        )
-        if collectors is not None:
-            for name, payload in collectors.close().items():
-                utils.atomic_torch_save(payload, config.hessians / f"{index}_{name}.pt")
-            utils.clear_cuda_cache()
-
-        validation_layer = (
-            validation.forward_original(layer, index, device=device, autocast_dtype=dtype)
-            if validation is not None
-            else None
-        )
-        if stage == "quantize" and selected and not layer_complete(index, config.checkpoints):
-            (config.checkpoints / f"{index}.complete").unlink(missing_ok=True)
-            for parameter in layer.parameters():
-                parameter.requires_grad_(False)
-            reconstruction = (
-                ReconstructionAdapter(
-                    train=train_layer,
-                    validation=validation_layer,
-                    seed=config.seed + index,
-                    mask_padding=config.mask_padding,
-                )
-                if validation_layer is not None
-                else None
-            )
-            finetune.quantize_finetune_decoder_layer(
-                layer,
-                quant_order(),
-                index,
-                codebook,
-                config,
-                device,
-                None,
-                None,
-                reconstruction_adapter=reconstruction,
-            )
-            missing = [
-                path for path in projection_paths(index, config.checkpoints) if not path.is_file()
-            ]
-            if missing:
-                raise RuntimeError(f"layer {index} missing checkpoints: {missing}")
-            atomic_write_completion(index, config.checkpoints)
-
-        layers[index] = nn.Identity()
-        utils.clear_cuda_cache()
-
-
-def _run_workers(config: QTIPConfig, stage: Stage) -> None:
-    family, model_layers = _model_contract(config.model)
-    start, end = layer_range(config, model_layers)
-    ranges = split_layer_ranges(start, end, config.devices)
     _initialize_run(config, family, end)
-    context = multiprocessing.get_context("spawn")
-    processes = [
-        (
-            device,
-            shard_start,
-            shard_end,
-            context.Process(
-                target=_run_shard, args=(config, stage, family, device, shard_start, shard_end)
-            ),
+    with tempfile.TemporaryDirectory(prefix="wvq-qtip-") as temporary:
+        rendezvous = Path(temporary, "store")
+        spawn(
+            _run_rank,
+            args=(config, stage, family, start, end, rendezvous),
+            nprocs=len(config.devices),
+            join=True,
         )
-        for device, shard_start, shard_end in ranges
-    ]
-    for _device, _start, _end, process in processes:
-        process.start()
-
-    failures = []
-    for device, shard_start, shard_end, process in processes:
-        process.join()
-        if process.exitcode:
-            failures.append((device, shard_start, shard_end, process.exitcode))
-    if failures:
-        raise RuntimeError(f"QTIP {stage} workers failed: {failures}")
 
     complete = hessian_complete if stage == "hessian" else layer_complete
     directory = config.hessians if stage == "hessian" else config.checkpoints

@@ -10,15 +10,7 @@ from torch import nn
 
 from weight_vq.qtip.artifacts import layer_complete
 from weight_vq.qtip.config import QTIPConfig
-from weight_vq.qtip.pipeline import (
-    _get_layers,
-    _initialize_run,
-    _model_contract,
-    _run_workers,
-    export,
-    split_layer_ranges,
-    validate,
-)
+from weight_vq.qtip.pipeline import _get_layers, _initialize_run, _model_contract, export, validate
 
 
 def config(tmp_path: Path) -> QTIPConfig:
@@ -52,11 +44,6 @@ def test_initialize_run_uses_run_local_tlut(
     assert received[0]["tlut_path"] == qtip_config.checkpoints / "tlut-l16-b9-v2.pt"
 
 
-def test_split_layer_ranges_is_balanced_and_contiguous() -> None:
-    assert split_layer_ranges(3, 10, [2, 5, 7, 9]) == [(2, 3, 5), (5, 5, 7), (7, 7, 9), (9, 9, 10)]
-    assert split_layer_ranges(0, 2, [0, 1, 2, 3]) == [(0, 0, 1), (1, 1, 2)]
-
-
 def test_model_family_selects_configured_decoder_stack(monkeypatch: pytest.MonkeyPatch) -> None:
     configs = {
         "text": SimpleNamespace(model_type="qwen3", num_hidden_layers=36),
@@ -81,84 +68,6 @@ def test_model_family_selects_configured_decoder_stack(monkeypatch: pytest.Monke
     assert _get_layers(vlm_model, "qwen3_vl") is vlm_layers  # type: ignore[arg-type]
 
 
-def test_run_workers_uses_spawn_with_direct_config_and_layer_ranges(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    launches: list[tuple[object, tuple[object, ...]]] = []
-    qtip_config = config(tmp_path)
-
-    class Process:
-        exitcode = 0
-
-        def __init__(self, *, target: object, args: tuple[object, ...]) -> None:
-            self.target = target
-            self.args = args
-
-        def start(self) -> None:
-            launches.append((self.target, self.args))
-            _config, _stage, _family, _device, start, end = self.args
-            assert isinstance(start, int) and isinstance(end, int)
-            for index in range(start, end):
-                for name in ("qkv", "o", "up", "down"):
-                    (qtip_config.hessians / f"{index}_{name}.pt").touch()
-
-        def join(self) -> None:
-            pass
-
-    context = SimpleNamespace(Process=Process)
-
-    def initialize(_config: QTIPConfig, _family: str, _end: int) -> None:
-        qtip_config.hessians.mkdir(parents=True)
-        qtip_config.checkpoints.mkdir(parents=True)
-
-    monkeypatch.setattr("weight_vq.qtip.pipeline._model_contract", lambda _model: ("qwen3_vl", 36))
-    monkeypatch.setattr("weight_vq.qtip.pipeline._initialize_run", initialize)
-    monkeypatch.setattr(
-        "weight_vq.qtip.pipeline.multiprocessing.get_context",
-        lambda method: context if method == "spawn" else None,
-    )
-    _run_workers(qtip_config, "hessian")
-
-    assert [args[3] for _target, args in launches] == [2, 5, 7, 9]
-    assert all(args[0] is qtip_config for _target, args in launches)
-    assert all(args[2] == "qwen3_vl" for _target, args in launches)
-    assert [args[4:] for _target, args in launches] == [(3, 5), (5, 7), (7, 9), (9, 10)]
-
-
-def test_run_workers_preserves_outputs_on_failure(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    qtip_config = config(tmp_path)
-    qtip_config.hessians.mkdir()
-    qtip_config.checkpoints.mkdir()
-    (qtip_config.hessians / "3_qkv.pt").touch()
-    monkeypatch.setattr("weight_vq.qtip.pipeline._model_contract", lambda _model: ("qwen3_vl", 36))
-    monkeypatch.setattr(
-        "weight_vq.qtip.pipeline._initialize_run", lambda _config, _family, _end: None
-    )
-
-    class Process:
-        exitcode = 4
-
-        def __init__(self, **_kwargs: object) -> None:
-            pass
-
-        def start(self) -> None:
-            pass
-
-        def join(self) -> None:
-            pass
-
-    context = SimpleNamespace(Process=Process)
-
-    monkeypatch.setattr(
-        "weight_vq.qtip.pipeline.multiprocessing.get_context", lambda _method: context
-    )
-    with pytest.raises(RuntimeError, match="workers failed"):
-        _run_workers(qtip_config, "hessian")
-    assert (qtip_config.hessians / "3_qkv.pt").is_file()
-
-
 def test_qtip_config_is_the_verified_native_recipe() -> None:
     qtip_config = QTIPConfig(
         model=Path("/model"),
@@ -176,9 +85,13 @@ def test_qtip_config_is_the_verified_native_recipe() -> None:
     assert qtip_config.split_for_tp is False
     assert qtip_config.learning_rate == 3e-6
     recipe = qtip_config.recipe(model_family="qwen3_vl", layer_end=36)
+    assert recipe["schema_version"] == 3
     assert recipe["seed"] == 17
     assert recipe["format"] == "qtip-bitshift-trellis-qwen3-vl-dense-qdq"
     assert "checkpoints" not in recipe
+    assert "devices" not in recipe
+    assert "batch_size" not in recipe
+    assert "replay_device" not in recipe
 
 
 class ExportAttention(nn.Module):
