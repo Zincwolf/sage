@@ -33,6 +33,7 @@ def smoke_config(tmp_path: Path, family: str = "qwen3_vl") -> SPHQuantConfig:
         device=3,
         sample_size=512,
         kmeans_iterations=2,
+        codebook_bits=8,
         epochs=0,
         cache_shards=2,
         max_layers=1,
@@ -137,6 +138,7 @@ def test_optimize_maps_qwen3_vl_recipe(monkeypatch: pytest.MonkeyPatch, tmp_path
     assert arguments["model_dtype"] == "bfloat16"
     assert arguments["sph_sample_size"] == 512
     assert arguments["sph_kmeans_iterations"] == 2
+    assert arguments["sph_codebook_bits"] == 8
     assert device == "3"
 
 

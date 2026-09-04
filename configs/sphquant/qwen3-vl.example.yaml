@@ -9,9 +9,11 @@ exported_model: outputs/sphquant/qwen3-vl-hf-layerwise
 # SPHQuant is sequential across layers and therefore uses one physical GPU.
 device: 0
 
-# Spherical codebook initialization.
+# Spherical codebook initialization. codebook_bits: 8 keeps the 10-bit
+# per-vector budget by using 256 directions and 2-bit radii.
 sample_size: 65536
 kmeans_iterations: 20
+codebook_bits: 8
 
 # Layerwise radius/codebook recovery. The verified full recipe uses 20 epochs.
 epochs: 20

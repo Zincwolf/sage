@@ -75,6 +75,8 @@ def missing_checkpoints(config: SPHQuantConfig, model_layers: int | None = None)
 
 
 def optimize(config: SPHQuantConfig) -> None:
+    if not 1 <= config.codebook_bits <= 8:
+        raise ValueError("codebook_bits must be within [1, 8]")
     family, model_layers = _model_contract(config.model)
     _target_layers(config, model_layers)
 
@@ -127,6 +129,7 @@ def optimize(config: SPHQuantConfig) -> None:
         "max_layers": config.max_layers,
         "sph_sample_size": config.sample_size,
         "sph_kmeans_iterations": config.kmeans_iterations,
+        "sph_codebook_bits": config.codebook_bits,
         "cache_shards": config.cache_shards,
         "output_dir": str(config.checkpoints),
         "resume": config.resume,

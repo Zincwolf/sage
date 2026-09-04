@@ -134,6 +134,7 @@ def test_cli_loads_shared_flat_sphquant_config(
         "device: 2\n"
         "sample_size: 512\n"
         "kmeans_iterations: 2\n"
+        "codebook_bits: 8\n"
         "epochs: 0\n"
         "cache_shards: 2\n"
         "max_layers: 1\n"
@@ -153,6 +154,7 @@ def test_cli_loads_shared_flat_sphquant_config(
             device=2,
             sample_size=512,
             kmeans_iterations=2,
+            codebook_bits=8,
             epochs=0,
             cache_shards=2,
             max_layers=1,

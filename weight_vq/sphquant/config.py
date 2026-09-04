@@ -17,6 +17,7 @@ class SPHQuantConfig:
     device: int = 0
     sample_size: int = 65536
     kmeans_iterations: int = 20
+    codebook_bits: int = 6
     epochs: int = 20
     learning_rate: float = 1e-3
     batch_size: int = 16
