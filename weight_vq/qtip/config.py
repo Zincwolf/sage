@@ -13,9 +13,7 @@ class QTIPConfig:
 
     model: Path
     calibration: Path
-    hessians: Path
-    checkpoints: Path
-    exported_model: Path
+    output_dir: Path
 
     devices: list[int]
     seed: int = 0
@@ -55,14 +53,24 @@ class QTIPConfig:
     split_for_tp: bool = False
     tp_rank: int = 8
 
+    @property
+    def hessians(self) -> Path:
+        return self.output_dir / "hessians"
+
+    @property
+    def checkpoints(self) -> Path:
+        return self.output_dir / "checkpoints"
+
+    @property
+    def exported_model(self) -> Path:
+        return self.output_dir / "exported_model"
+
     def recipe(self, *, model_family: str, layer_end: int) -> dict[str, object]:
         payload = asdict(self)
         payload["model"] = str(self.model.resolve())
         payload["calibration"] = str(self.calibration.resolve())
         for name in (
-            "hessians",
-            "checkpoints",
-            "exported_model",
+            "output_dir",
             "devices",
             "batch_size",
             "replay_device",

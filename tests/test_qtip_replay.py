@@ -27,9 +27,7 @@ def config(tmp_path: Path, calibration: Path) -> QTIPConfig:
     return QTIPConfig(
         model=tmp_path / "model",
         calibration=calibration,
-        hessians=tmp_path / "hessians",
-        checkpoints=tmp_path / "checkpoints",
-        exported_model=tmp_path / "export",
+        output_dir=tmp_path,
         devices=[0],
         train_samples=4,
         validation_samples=2,

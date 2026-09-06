@@ -2,9 +2,8 @@
 model: /path/to/Qwen3-VL-8B-Instruct
 calibration: /path/to/coco-calibration.manifest.json
 
-# ParoQuant writes checkpoints/<model.name>; export publishes a dense HF model.
-checkpoints: outputs/sphquant/qwen3-vl-layerwise
-exported_model: outputs/sphquant/qwen3-vl-hf-layerwise
+# Derives checkpoints/<model.name> and exported_model under this directory.
+output_dir: outputs/sphquant/qwen3-vl
 
 # SPHQuant is sequential across layers and therefore uses one physical GPU.
 device: 0

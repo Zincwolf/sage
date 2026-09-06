@@ -28,8 +28,7 @@ def smoke_config(tmp_path: Path, family: str = "qwen3_vl") -> SPHQuantConfig:
         calibration=Path(
             "/data/coco_calibration_manifest.json" if vlm else "outputs/calibration.pt"
         ),
-        checkpoints=tmp_path / "checkpoints",
-        exported_model=tmp_path / ("hf-vlm" if vlm else "hf-text"),
+        output_dir=tmp_path,
         device=3,
         sample_size=512,
         kmeans_iterations=2,
@@ -136,6 +135,7 @@ def test_optimize_maps_qwen3_vl_recipe(monkeypatch: pytest.MonkeyPatch, tmp_path
     assert arguments["calibration_path"] is None
     assert arguments["multimodal_calibration_path"] == ("/data/coco_calibration_manifest.json")
     assert arguments["model_dtype"] == "bfloat16"
+    assert arguments["output_dir"] == str(tmp_path / "checkpoints")
     assert arguments["sph_sample_size"] == 512
     assert arguments["sph_kmeans_iterations"] == 2
     assert arguments["sph_codebook_bits"] == 8
@@ -194,7 +194,8 @@ def test_export_runs_shared_converter_in_staging_directory(
         str(config.checkpoints / "Qwen3-4B-Instruct-2507"),
     ]
     staging = Path(arguments[arguments.index("--output-path") + 1])
-    assert staging.name.startswith(".hf-text.tmp-")
+    assert staging.name.startswith(".exported_model.tmp-")
+    assert staging.parent == config.output_dir
     assert device == "3"
     assert (config.exported_model / "model.safetensors").is_file()
     assert not staging.exists()

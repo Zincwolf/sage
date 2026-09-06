@@ -12,8 +12,7 @@ class SPHQuantConfig:
 
     model: Path
     calibration: Path
-    checkpoints: Path
-    exported_model: Path
+    output_dir: Path
     device: int = 0
     sample_size: int = 65536
     kmeans_iterations: int = 20
@@ -29,3 +28,11 @@ class SPHQuantConfig:
     max_layers: int | None = None
     calibration_limit: int | None = None
     use_wandb: bool = False
+
+    @property
+    def checkpoints(self) -> Path:
+        return self.output_dir / "checkpoints"
+
+    @property
+    def exported_model(self) -> Path:
+        return self.output_dir / "exported_model"

@@ -62,9 +62,7 @@ def test_cli_loads_and_forwards_qtip_config(
     config.write_text(
         "model: /models/qwen3-vl\n"
         "calibration: /data/coco.manifest.json\n"
-        "hessians: outputs/qtip/hessians\n"
-        "checkpoints: outputs/qtip/trellis\n"
-        "exported_model: outputs/qtip/hf-dense-qdq\n"
+        "output_dir: outputs/qtip\n"
         "devices: [0, 2]\n"
         "train_samples: 16\n"
         "validation_samples: 8\n"
@@ -82,9 +80,7 @@ def test_cli_loads_and_forwards_qtip_config(
         QTIPConfig(
             model=Path("/models/qwen3-vl"),
             calibration=Path("/data/coco.manifest.json"),
-            hessians=Path("outputs/qtip/hessians"),
-            checkpoints=Path("outputs/qtip/trellis"),
-            exported_model=Path("outputs/qtip/hf-dense-qdq"),
+            output_dir=Path("outputs/qtip"),
             devices=[0, 2],
             train_samples=16,
             validation_samples=8,
@@ -129,8 +125,7 @@ def test_cli_loads_shared_flat_sphquant_config(
     config.write_text(
         "model: /models/qwen3-vl\n"
         "calibration: /data/coco.manifest.json\n"
-        "checkpoints: outputs/sphquant/layerwise\n"
-        "exported_model: outputs/sphquant/hf-layerwise\n"
+        "output_dir: outputs/sphquant\n"
         "device: 2\n"
         "sample_size: 512\n"
         "kmeans_iterations: 2\n"
@@ -149,8 +144,7 @@ def test_cli_loads_shared_flat_sphquant_config(
         SPHQuantConfig(
             model=Path("/models/qwen3-vl"),
             calibration=Path("/data/coco.manifest.json"),
-            checkpoints=Path("outputs/sphquant/layerwise"),
-            exported_model=Path("outputs/sphquant/hf-layerwise"),
+            output_dir=Path("outputs/sphquant"),
             device=2,
             sample_size=512,
             kmeans_iterations=2,

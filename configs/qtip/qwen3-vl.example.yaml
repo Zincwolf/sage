@@ -1,9 +1,8 @@
 # Original Qwen3-VL Hugging Face model and frozen COCO multimodal manifest.
 model: /path/to/Qwen3-VL-8B-Instruct
 calibration: /path/to/coco-calibration.manifest.json
-hessians: outputs/qtip/hessians
-checkpoints: outputs/qtip/checkpoints
-exported_model: outputs/qtip/hf-dense-qdq
+# Artifact subdirectories are derived from this experiment directory.
+output_dir: outputs/qtip/qwen3-vl
 
 # Execution. Every selected GPU processes a rank-local slice of each global batch.
 devices: [0, 1, 2, 3]

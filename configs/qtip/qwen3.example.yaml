@@ -1,9 +1,8 @@
 # Original Qwen3 Hugging Face model and pre-tokenized mixed-text calibration.
 model: /path/to/Qwen3-4B-Instruct-2507
 calibration: /path/to/calibration.pt
-hessians: outputs/qtip/qwen3/hessians
-checkpoints: outputs/qtip/qwen3/checkpoints
-exported_model: outputs/qtip/qwen3/hf-dense-qdq
+# Artifact subdirectories are derived from this experiment directory.
+output_dir: outputs/qtip/qwen3
 
 # Every selected GPU processes a rank-local slice of each global batch.
 devices: [0, 1, 2, 3]

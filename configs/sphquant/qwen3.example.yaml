@@ -2,9 +2,8 @@
 model: /path/to/Qwen3-4B-Instruct-2507
 calibration: outputs/calibration/calibration.pt
 
-# ParoQuant writes checkpoints/<model.name>; export publishes a dense HF model.
-checkpoints: outputs/sphquant/qwen3-layerwise
-exported_model: outputs/sphquant/qwen3-hf-layerwise
+# Derives checkpoints/<model.name> and exported_model under this directory.
+output_dir: outputs/sphquant/qwen3
 
 # SPHQuant is sequential across layers and therefore uses one physical GPU.
 device: 0

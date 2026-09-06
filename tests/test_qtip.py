@@ -17,9 +17,7 @@ def config(tmp_path: Path) -> QTIPConfig:
     return QTIPConfig(
         model=Path("/models/Qwen3-VL-8B-Instruct"),
         calibration=Path("/data/coco.manifest.json"),
-        hessians=tmp_path / "hessians",
-        checkpoints=tmp_path / "trellis",
-        exported_model=tmp_path / "hf-dense-qdq",
+        output_dir=tmp_path,
         devices=[2, 5, 7, 9],
         train_samples=16,
         validation_samples=8,
@@ -72,9 +70,7 @@ def test_qtip_config_is_the_verified_native_recipe() -> None:
     qtip_config = QTIPConfig(
         model=Path("/model"),
         calibration=Path("/calibration"),
-        hessians=Path("/hessians"),
-        checkpoints=Path("/checkpoints"),
-        exported_model=Path("/export"),
+        output_dir=Path("/output"),
         devices=[0],
         seed=17,
     )
@@ -88,6 +84,7 @@ def test_qtip_config_is_the_verified_native_recipe() -> None:
     assert recipe["schema_version"] == 3
     assert recipe["seed"] == 17
     assert recipe["format"] == "qtip-bitshift-trellis-qwen3-vl-dense-qdq"
+    assert "output_dir" not in recipe
     assert "checkpoints" not in recipe
     assert "devices" not in recipe
     assert "batch_size" not in recipe
