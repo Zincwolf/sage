@@ -6,8 +6,8 @@ import torch.distributed as dist
 from torch import nn
 from torch.multiprocessing.spawn import spawn
 
-from weight_vq.qtip.distributed import DistributedContext
 from weight_vq.qtip.calibration import local_batch_slice
+from weight_vq.qtip.distributed import DistributedContext
 from weight_vq.qtip.hessian import MaskedHessianCollector
 
 

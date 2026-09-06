@@ -35,9 +35,9 @@ from weight_vq.qtip.artifacts import (
     quant_order,
     reconstruct_dense_weight,
 )
+from weight_vq.qtip.calibration import local_batch_slice
 from weight_vq.qtip.config import QTIPConfig
 from weight_vq.qtip.distributed import process_group
-from weight_vq.qtip.calibration import local_batch_slice
 from weight_vq.qtip.hessian import LayerHessianCollectors
 from weight_vq.qtip.reconstruction import DistributedReconstruction
 from weight_vq.qtip.replay import LayerReplay, capture_replay
@@ -106,6 +106,7 @@ def _run_rank(
     start: int,
     end: int,
     rendezvous: Path,
+    model: nn.Module,
 ) -> None:
     if not torch.cuda.is_available():
         raise RuntimeError("QTIP hessian and quantize stages require CUDA")
@@ -122,21 +123,6 @@ def _run_rank(
             decode_mode=config.decode_mode,
             tlut_path=_tlut_path(config),
         )
-        model_loader = AutoModelForCausalLM if family == "qwen3" else AutoModelForImageTextToText
-        # TODO: Share CPU teacher weights across ranks after validating VLM serialization.
-        # I think /dev/shm is large enough for many machines to store a full teacher model.
-        model = cast(
-            nn.Module,
-            model_loader.from_pretrained(
-                config.model,
-                device_map="cpu",
-                dtype=dtype,
-                low_cpu_mem_usage=True,
-                local_files_only=True,
-                trust_remote_code=True,
-                attn_implementation="eager",
-            ),
-        ).eval()
         layers = _get_layers(model, family)
         train = capture_replay(
             model,
@@ -281,11 +267,31 @@ def _run_workers(config: QTIPConfig, stage: Stage) -> None:
         if missing:
             raise FileNotFoundError(f"missing QTIP Hessians for layers: {missing}")
     _initialize_run(config, family, end)
+    model_loader = AutoModelForCausalLM if family == "qwen3" else AutoModelForImageTextToText
+    model = (
+        cast(
+            nn.Module,
+            model_loader.from_pretrained(
+                config.model,
+                device_map="cpu",
+                dtype=cast(torch.dtype, getattr(torch, config.model_dtype)),
+                low_cpu_mem_usage=True,
+                local_files_only=True,
+                trust_remote_code=True,
+                attn_implementation="eager",
+            ),
+        )
+        .eval()
+        .requires_grad_(False)
+    )
+    # Spawn shares CPU storage; moving a worker's layer to CUDA gives it private weights.
+    # Keep the parent model alive until all workers finish using the shared storage.
+    model.share_memory()
     with tempfile.TemporaryDirectory(prefix="wvq-qtip-") as temporary:
         rendezvous = Path(temporary, "store")
         spawn(
             _run_rank,
-            args=(config, stage, family, start, end, rendezvous),
+            args=(config, stage, family, start, end, rendezvous, model),
             nprocs=len(config.devices),
             join=True,
         )
