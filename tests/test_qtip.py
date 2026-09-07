@@ -1,247 +1,127 @@
 import csv
+import json
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, cast
 
 import pytest
 import torch
-from torch import nn
+from transformers import Qwen3Config, Qwen3ForCausalLM
 
-from weight_vq.qtip.artifacts import layer_complete
+from weight_vq.qtip.artifacts import PROJECTIONS, atomic_write_completion, layer_complete
 from weight_vq.qtip.config import QTIPConfig
-from weight_vq.qtip.pipeline import _get_layers, _initialize_run, _model_contract, export, validate
+from weight_vq.qtip.pipeline import _initialize_run, _model_contract, export, validate
 
 
-def config(tmp_path: Path) -> QTIPConfig:
+def config(tmp_path):
     return QTIPConfig(
-        model=Path("/models/Qwen3-VL-8B-Instruct"),
-        calibration=Path("/data/coco.manifest.json"),
-        output_dir=tmp_path,
-        devices=[2, 5, 7, 9],
-        train_samples=16,
-        validation_samples=8,
-        batch_size=4,
-        reconstruction_epochs=1,
-        layer_start=3,
-        layer_end=10,
+        model=tmp_path / "model",
+        dataset=tmp_path / "rp",
+        output_dir=tmp_path / "output",
+        devices=[0],
     )
 
 
-def test_initialize_run_uses_run_local_tlut(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    received: list[dict[str, object]] = []
-    qtip_config = config(tmp_path)
+def test_initialize_run_uses_run_local_tlut(monkeypatch, tmp_path):
+    received = []
+    cfg = config(tmp_path)
     monkeypatch.setattr(
         "weight_vq.qtip.pipeline.bitshift_codebook", lambda **kwargs: received.append(kwargs)
     )
-
-    _initialize_run(qtip_config, "qwen3_vl", 10)
-
-    assert received[0]["tlut_path"] == qtip_config.checkpoints / "tlut-l16-b9-v2.pt"
+    _initialize_run(cfg, "qwen3", 2)
+    assert received[0]["tlut_path"] == cfg.checkpoints / "tlut-l16-b9-v2.pt"
 
 
-def test_model_family_selects_configured_decoder_stack(monkeypatch: pytest.MonkeyPatch) -> None:
-    configs = {
-        "text": SimpleNamespace(model_type="qwen3", num_hidden_layers=36),
-        "vlm": SimpleNamespace(
-            model_type="qwen3_vl", text_config=SimpleNamespace(num_hidden_layers=40)
-        ),
-    }
+def test_model_contract_rejects_retired_qtip_vl(monkeypatch):
     monkeypatch.setattr(
         "weight_vq.qtip.pipeline.AutoConfig.from_pretrained",
-        lambda path, **_kwargs: configs[str(path)],
+        lambda *a, **k: SimpleNamespace(model_type="qwen3_vl"),
     )
-    text_layers = nn.ModuleList([nn.Identity()])
-    vlm_layers = nn.ModuleList([nn.Identity(), nn.Identity()])
-    text_model = SimpleNamespace(model=SimpleNamespace(layers=text_layers))
-    vlm_model = SimpleNamespace(
-        model=SimpleNamespace(language_model=SimpleNamespace(layers=vlm_layers))
-    )
-
-    assert _model_contract(Path("text")) == ("qwen3", 36)
-    assert _model_contract(Path("vlm")) == ("qwen3_vl", 40)
-    assert _get_layers(text_model, "qwen3") is text_layers  # type: ignore[arg-type]
-    assert _get_layers(vlm_model, "qwen3_vl") is vlm_layers  # type: ignore[arg-type]
+    with pytest.raises(ValueError, match="currently supports qwen3"):
+        _model_contract(Path("/vl"))
 
 
-def test_qtip_config_is_the_verified_native_recipe() -> None:
-    qtip_config = QTIPConfig(
-        model=Path("/model"),
-        calibration=Path("/calibration"),
-        output_dir=Path("/output"),
-        devices=[0],
-        seed=17,
-    )
-
-    assert (qtip_config.L, qtip_config.K, qtip_config.V, qtip_config.tlut_bits) == (16, 2, 2, 9)
-    assert (qtip_config.td_x, qtip_config.td_y, qtip_config.decode_mode) == (16, 16, "quantlut_sym")
-    assert qtip_config.packed_inference_kernel is False
-    assert qtip_config.split_for_tp is False
-    assert qtip_config.learning_rate == 3e-6
-    recipe = qtip_config.recipe(model_family="qwen3_vl", layer_end=36)
-    assert recipe["schema_version"] == 3
-    assert recipe["seed"] == 17
-    assert recipe["format"] == "qtip-bitshift-trellis-qwen3-vl-dense-qdq"
-    assert "output_dir" not in recipe
-    assert "checkpoints" not in recipe
-    assert "devices" not in recipe
-    assert "batch_size" not in recipe
-    assert "replay_device" not in recipe
+def test_recipe_separates_execution_and_algorithm(tmp_path):
+    cfg = config(tmp_path)
+    recipe = cfg.recipe(model_family="qwen3", layer_end=36)
+    assert recipe["schema_version"] == 4
+    assert recipe["batch_size"] == 8
+    assert recipe["learning_rate"] == 5e-5
+    assert recipe["susv_learning_rate"] == 5e-4
+    assert recipe["train_lut"] is True
+    assert recipe["reconstruction_epochs"] == 5
+    assert cfg.calibration_recipe()["hessian"] == {
+        "shape": [4096, 8192],
+        "sampling": "replacement-full-documents-concatenate-reshape",
+    }
+    assert cfg.calibration_recipe()["train"] == {"shape": [256, 2048]}
+    for key in ("devices", "replay_device", "forward_microbatch_size", "output_dir"):
+        assert key not in recipe
 
 
-class ExportAttention(nn.Module):
-    def __init__(self) -> None:
-        super().__init__()
-        self.q_proj = nn.Linear(1, 1, bias=False)
-        self.k_proj = nn.Linear(1, 1, bias=False)
-        self.v_proj = nn.Linear(1, 1, bias=False)
-        self.o_proj = nn.Linear(1, 1, bias=False)
-
-
-class ExportMlp(nn.Module):
-    def __init__(self) -> None:
-        super().__init__()
-        self.gate_proj = nn.Linear(1, 1, bias=False)
-        self.up_proj = nn.Linear(1, 1, bias=False)
-        self.down_proj = nn.Linear(1, 1, bias=False)
-
-
-class ExportLayer(nn.Module):
-    def __init__(self) -> None:
-        super().__init__()
-        self.self_attn = ExportAttention()
-        self.mlp = ExportMlp()
-
-
-class FakeModel:
-    def __init__(self, family: str) -> None:
-        layers = nn.ModuleList(ExportLayer() for _ in range(10))
-        self.model = (
-            SimpleNamespace(layers=layers)
-            if family == "qwen3"
-            else SimpleNamespace(language_model=SimpleNamespace(layers=layers))
+def test_export_loads_auxiliary_norms_and_preserves_untouched_modules(
+    tmp_path, monkeypatch, capsys
+):
+    cfg = config(tmp_path)
+    model = Qwen3ForCausalLM(
+        Qwen3Config(
+            vocab_size=64,
+            hidden_size=32,
+            intermediate_size=64,
+            num_hidden_layers=1,
+            num_attention_heads=4,
+            num_key_value_heads=2,
+            head_dim=8,
         )
-
-    def eval(self) -> "FakeModel":
-        return self
-
-    def save_pretrained(self, path: Path, **_kwargs: Any) -> None:
-        (path / "model.safetensors").touch()
-
-
-class FakeAssets:
-    def __init__(self, filename: str) -> None:
-        self.filename = filename
-
-    def save_pretrained(self, path: Path) -> None:
-        (path / self.filename).touch()
-
-
-@pytest.mark.parametrize(
-    ("family", "model_api", "assets_api", "assets_file"),
-    [
-        ("qwen3", "AutoModelForCausalLM", "AutoTokenizer", "tokenizer_config.json"),
-        ("qwen3_vl", "AutoModelForImageTextToText", "AutoProcessor", "processor_config.json"),
-    ],
-)
-def test_export_uses_family_hf_apis_and_injects_dense_weights(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-    family: str,
-    model_api: str,
-    assets_api: str,
-    assets_file: str,
-) -> None:
-    qtip_config = config(tmp_path)
-    qtip_config.checkpoints.mkdir()
-    for index in range(3, 10):
-        (qtip_config.checkpoints / f"{index}.complete").touch()
-        for name in ("v", "q", "k", "o", "up", "gate", "down"):
-            (qtip_config.checkpoints / f"{index}_{name}.pt").touch()
-    (qtip_config.checkpoints / "qtip_config.json").write_text("{}")
-    model = FakeModel(family)
-    model_loads: list[dict[str, Any]] = []
-    assets_loads: list[dict[str, Any]] = []
-
-    class AutoModel:
-        @staticmethod
-        def from_pretrained(_path: Path, **kwargs: Any) -> FakeModel:
-            model_loads.append(kwargs)
-            return model
-
-    class AutoAssets:
-        @staticmethod
-        def from_pretrained(_path: Path, **kwargs: Any) -> FakeAssets:
-            assets_loads.append(kwargs)
-            return FakeAssets(assets_file)
-
-    monkeypatch.setattr("weight_vq.qtip.pipeline._model_contract", lambda _model: (family, 10))
-    monkeypatch.setattr(f"weight_vq.qtip.pipeline.{model_api}", AutoModel)
-    monkeypatch.setattr(f"weight_vq.qtip.pipeline.{assets_api}", AutoAssets)
-    monkeypatch.setattr("weight_vq.qtip.pipeline.torch.load", lambda *_args, **_kwargs: {})
-    monkeypatch.setattr(
-        "weight_vq.qtip.pipeline.reconstruct_dense_weight", lambda _saved, _recipe: torch.ones(1, 1)
+    ).eval()
+    model.save_pretrained(cfg.model)
+    original_embeddings = model.model.embed_tokens.weight.detach().clone()
+    cfg.checkpoints.mkdir(parents=True)
+    for attribute, short, *_ in PROJECTIONS:
+        weight = model.model.layers[0].get_parameter(f"{attribute}.weight")
+        torch.save({"weight": weight.detach() * 0.8}, cfg.checkpoints / f"0_{short}.pt")
+        weight.data.mul_(0.8)
+    auxiliary = {
+        "self_attn.q_norm.weight": torch.full((8,), 1.3),
+        "self_attn.k_norm.weight": torch.full((8,), 0.7),
+        "input_layernorm.weight": torch.full((32,), 1.1),
+        "post_attention_layernorm.weight": torch.full((32,), 0.9),
+    }
+    torch.save(auxiliary, cfg.checkpoints / "0.auxiliary.pt")
+    for name, value in auxiliary.items():
+        model.model.layers[0].get_parameter(name).data.copy_(value)
+    atomic_write_completion(0, cfg.checkpoints)
+    (cfg.checkpoints / "qtip_config.json").write_text(
+        json.dumps(cfg.recipe(model_family="qwen3", layer_end=1))
     )
-
-    export(qtip_config)
-
-    assert model_loads[0]["device_map"] == "cpu"
-    assert assets_loads[0]["local_files_only"] is True
-    assert (qtip_config.exported_model / "model.safetensors").is_file()
-    assert (qtip_config.exported_model / assets_file).is_file()
-    layers = _get_layers(model, family)  # type: ignore[arg-type]
-    layer = cast(ExportLayer, layers[3])
-    torch.testing.assert_close(layer.self_attn.q_proj.weight, torch.ones(1, 1))
-
-
-@pytest.mark.parametrize(
-    ("family", "model_api", "layer_prefix"),
-    [
-        ("qwen3", "AutoModelForCausalLM", "model.layers"),
-        ("qwen3_vl", "AutoModelForImageTextToText", "model.language_model.layers"),
-    ],
-)
-def test_validate_uses_family_model_and_prints_target_statistics(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-    capsys: pytest.CaptureFixture[str],
-    family: str,
-    model_api: str,
-    layer_prefix: str,
-) -> None:
-    qtip_config = config(tmp_path)
-    loads: list[dict[str, Any]] = []
-
-    model = nn.Module()
-    backbone = nn.Module()
-    backbone.layers = nn.ModuleList(ExportLayer() for _ in range(10))
-    if family == "qwen3":
-        model.model = backbone
-    else:
-        model.model = nn.Module()
-        model.model.language_model = backbone
-
-    class AutoModel:
-        @staticmethod
-        def from_pretrained(_path: Path, **kwargs: Any) -> nn.Module:
-            loads.append(kwargs)
-            return model
-
-    monkeypatch.setattr("weight_vq.qtip.pipeline._model_contract", lambda _model: (family, 36))
-    monkeypatch.setattr(f"weight_vq.qtip.pipeline.{model_api}", AutoModel)
-
-    validate(qtip_config)
-
-    assert loads[0]["device_map"] == 0
+    monkeypatch.setattr(
+        "weight_vq.qtip.pipeline.reconstruct_dense_weight", lambda saved, recipe: saved["weight"]
+    )
+    assets = SimpleNamespace(save_pretrained=lambda path: (path / "tokenizer.json").touch())
+    monkeypatch.setattr(
+        "weight_vq.qtip.pipeline.AutoTokenizer.from_pretrained", lambda *a, **k: assets
+    )
+    export(cfg)
+    restored = Qwen3ForCausalLM.from_pretrained(cfg.exported_model).eval()
+    tokens = torch.tensor([[1, 2, 3]])
+    torch.testing.assert_close(restored(tokens).logits, model(tokens).logits)
+    torch.testing.assert_close(restored.model.embed_tokens.weight, original_embeddings)
+    for name, value in auxiliary.items():
+        torch.testing.assert_close(restored.model.layers[0].get_parameter(name), value)
+    monkeypatch.setattr(
+        "weight_vq.qtip.pipeline.AutoModelForCausalLM.from_pretrained", lambda *a, **k: restored
+    )
+    validate(cfg)
     rows = list(csv.reader(capsys.readouterr().out.splitlines()))
-    assert len(rows) == 1 + 7 * 7
-    assert rows[1][0] == f"{layer_prefix}.3.self_attn.v_proj"
+    assert len(rows) == 8
+    with pytest.raises(FileExistsError):
+        export(cfg)
 
 
-def test_layer_complete_requires_marker_and_all_seven_checkpoints(tmp_path: Path) -> None:
-    for name in ("v", "q", "k", "o", "up", "gate", "down"):
-        (tmp_path / f"0_{name}.pt").touch()
-    assert not layer_complete(0, tmp_path)
-    (tmp_path / "0.complete").touch()
+def test_completion_requires_auxiliary_state(tmp_path):
+    for _, short, *_ in PROJECTIONS:
+        (tmp_path / f"0_{short}.pt").touch()
+    with pytest.raises(RuntimeError, match="auxiliary"):
+        atomic_write_completion(0, tmp_path)
+    (tmp_path / "0.auxiliary.pt").touch()
+    atomic_write_completion(0, tmp_path)
     assert layer_complete(0, tmp_path)

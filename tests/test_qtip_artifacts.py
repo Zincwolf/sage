@@ -32,5 +32,6 @@ def test_completion_marker_covers_all_projection_checkpoints(tmp_path: Path) -> 
         path.touch()
     assert not layer_complete(4, tmp_path)
 
+    (tmp_path / "4.auxiliary.pt").touch()
     atomic_write_completion(4, tmp_path)
     assert layer_complete(4, tmp_path)

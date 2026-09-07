@@ -1,0 +1,22 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Zincwolf <zincwolf@outlook.com>
+Date: Tue, 8 Sep 2026 00:03:22 +0800
+Subject: [PATCH] fix: use non-reentrant quantized linear checkpointing
+
+---
+ lib/linear/quantized_linear.py | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/lib/linear/quantized_linear.py b/lib/linear/quantized_linear.py
+index a917f4b..d52b816 100644
+--- a/lib/linear/quantized_linear.py
++++ b/lib/linear/quantized_linear.py
+@@ -88,7 +88,7 @@ class QuantizedLinear(nn.Module):
+     def ckpt_forward(self, input):
+         return torch.utils.checkpoint.checkpoint(self.no_ckpt_forward,
+                                                  input,
+-                                                 use_reentrant=True)
++                                                 use_reentrant=False)
+ 
+     def no_ckpt_forward(self, input):
+         if not self.built_codebook_class:

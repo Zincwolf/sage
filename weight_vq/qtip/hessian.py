@@ -50,20 +50,23 @@ class MaskedHessianCollector:
         self.matrix.addmm_(flattened.T, flattened)
         self.count += flattened.shape[0]
 
-    def close(
-        self, distributed: DistributedContext | None = None
-    ) -> dict[str, torch.Tensor | int | str]:
+    def close_raw(self, distributed: DistributedContext | None = None) -> tuple[torch.Tensor, int]:
         self._handle.remove()
-        if self.count == 0:
-            raise RuntimeError("Hessian collector observed no valid inputs")
         count = self.count
         if distributed is not None:
             distributed.sum_(self.matrix)
             count = int(distributed.global_count(count))
-        matrix = (self.matrix / count).cpu()
+        matrix = self.matrix.cpu()
+        self.matrix = torch.empty(0)
+        return matrix, count
+
+    def close(
+        self, distributed: DistributedContext | None = None
+    ) -> dict[str, torch.Tensor | int | str]:
+        matrix, count = self.close_raw(distributed)
+        matrix.div_(count)
         rows, columns = torch.tril_indices(self.size, self.size)
         flattened = matrix[rows, columns].contiguous()
-        self.matrix = torch.empty(0)
         return {
             "flatH": flattened,
             "n": self.size,

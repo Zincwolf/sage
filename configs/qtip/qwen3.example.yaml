@@ -1,10 +1,9 @@
-# Original Qwen3 Hugging Face model and pre-tokenized mixed-text calibration.
+# Qwen3 blockwise W2 migration: no E2E, plain-text RedPajama train documents.
 model: /path/to/Qwen3-4B-Instruct-2507
-calibration: /path/to/calibration.pt
-# Artifact subdirectories are derived from this experiment directory.
-output_dir: outputs/qtip/qwen3
+# Existing HF datasets Arrow cache directory; no automatic downloads.
+dataset: /path/to/RedPajama/Arrows
+output_dir: /path/to/outputs/qtip/qwen3-4b-rp-blockwise
 
-# Every selected GPU processes a rank-local slice of each global batch.
 devices: [0, 1, 2, 3]
 seed: 0
 layer_start: 0
@@ -12,15 +11,21 @@ layer_end: null
 num_cpu_threads: 8
 model_dtype: bfloat16
 
-# Verified Qwen3 token calibration protocol: 1920 train and 128 validation
-# sequences of 2048 tokens. The configured global replay batch size is 16.
-train_samples: 1920
+# QTIP Llama-3 Hessian specification migrated to Qwen3, not validated by the paper.
+hessian_samples: 4096
+hessian_sequence_length: 8192
+# Independent long-document prefixes; train first, validation second.
+train_samples: 256
 validation_samples: 128
-batch_size: 16
-replay_device: cuda
-include_padding_in_hessian: false
+sequence_length: 2048
 
-# Verified W2 bitshift trellis recipe.
+# Execution controls: global Hessian chunk, then per-rank forward microbatch.
+hessian_chunk_size: 256
+forward_microbatch_size: 1
+reconstruction_microbatch_size: 1
+# Reconstruction placement only. Hessian keeps just the current chunk on CUDA.
+replay_device: cuda
+
 td_x: 16
 td_y: 16
 L: 16
@@ -32,17 +37,11 @@ sigma_reg: 0.01
 scale_override: 0.9
 use_fp64: false
 
-# The verified Qwen3 PTQ baseline does not run layer reconstruction.
+# Adam, complete block MSE after every newly quantized projection.
 reconstruction_epochs: 5
-learning_rate: 0.000003
-update_frequency: 1
-validation_frequency: 1
-early_stop: 1
+learning_rate: 0.00005
+susv_learning_rate: 0.0005
+batch_size: 8
+# LUT belongs to the ordinary group as a migration choice, not a QuIP# prescription.
+train_lut: true
 gradient_checkpointing: false
-train_lut: false
-mask_padding: true
-
-# Dense QDQ does not use packed inference or tensor-parallel checkpoints.
-packed_inference_kernel: false
-split_for_tp: false
-tp_rank: 8

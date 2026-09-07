@@ -15,7 +15,7 @@ def test_output_paths_are_derived_without_filesystem_side_effects(
 ) -> None:
     root = tmp_path / "nested" / "experiment"
     if config_type is QTIPConfig:
-        config = QTIPConfig(model=tmp_path, calibration=tmp_path, output_dir=root, devices=[0])
+        config = QTIPConfig(model=tmp_path, dataset=tmp_path, output_dir=root, devices=[0])
         assert config.hessians == root / "hessians"
     else:
         config = SPHQuantConfig(model=tmp_path, calibration=tmp_path, output_dir=root)
@@ -39,8 +39,12 @@ def test_cli_output_dir_override_controls_all_stages(
 ) -> None:
     path = tmp_path / "experiment.yaml"
     path.write_text(
-        "model: /models/model\ncalibration: /data/calibration\noutput_dir: original/run\n"
-        + ("devices: [0]\n" if method == "qtip" else "")
+        "model: /models/model\noutput_dir: original/run\n"
+        + (
+            "dataset: /data/rp\ndevices: [0]\n"
+            if method == "qtip"
+            else "calibration: /data/calibration\n"
+        )
     )
     config_type = QTIPConfig if method == "qtip" else SPHQuantConfig
     received: list[QTIPConfig | SPHQuantConfig] = []
@@ -66,8 +70,12 @@ def test_cli_output_dir_override_controls_all_stages(
 def test_cli_rejects_independent_artifact_paths(tmp_path: Path, method: str, field: str) -> None:
     path = tmp_path / "experiment.yaml"
     path.write_text(
-        "model: /models/model\ncalibration: /data/calibration\noutput_dir: outputs/run\n"
-        + ("devices: [0]\n" if method == "qtip" else "")
+        "model: /models/model\noutput_dir: outputs/run\n"
+        + (
+            "dataset: /data/rp\ndevices: [0]\n"
+            if method == "qtip"
+            else "calibration: /data/calibration\n"
+        )
         + f"{field}: /independent/path\n"
     )
     with pytest.raises(SystemExit) as error:
@@ -79,10 +87,10 @@ def test_qtip_initializes_nested_output_and_keeps_recipe_relocatable(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     root = tmp_path / "nested" / "run"
-    config = QTIPConfig(model=tmp_path, calibration=tmp_path, output_dir=root, devices=[0])
+    config = QTIPConfig(model=tmp_path, dataset=tmp_path, output_dir=root, devices=[0])
     monkeypatch.setattr("weight_vq.qtip.pipeline.bitshift_codebook", lambda **_kwargs: None)
     _initialize_run(config, "qwen3", 2)
-    assert config.hessians.is_dir()
+    assert not config.hessians.exists()
     assert config.checkpoints.is_dir()
     assert (config.checkpoints / "qtip_config.json").is_file()
     assert not config.exported_model.exists()

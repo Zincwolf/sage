@@ -60,8 +60,8 @@ def test_cli_loads_and_forwards_qtip_config(
 ) -> None:
     config = tmp_path / "qtip.yaml"
     config.write_text(
-        "model: /models/qwen3-vl\n"
-        "calibration: /data/coco.manifest.json\n"
+        "model: /models/qwen3\n"
+        "dataset: /data/rp\n"
         "output_dir: outputs/qtip\n"
         "devices: [0, 2]\n"
         "train_samples: 16\n"
@@ -78,8 +78,8 @@ def test_cli_loads_and_forwards_qtip_config(
 
     assert received == [
         QTIPConfig(
-            model=Path("/models/qwen3-vl"),
-            calibration=Path("/data/coco.manifest.json"),
+            model=Path("/models/qwen3"),
+            dataset=Path("/data/rp"),
             output_dir=Path("outputs/qtip"),
             devices=[0, 2],
             train_samples=16,

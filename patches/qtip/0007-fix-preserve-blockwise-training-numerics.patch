@@ -1,0 +1,136 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Zincwolf <zincwolf@outlook.com>
+Date: Tue, 8 Sep 2026 00:03:22 +0800
+Subject: [PATCH] fix: preserve blockwise training numerics
+
+---
+ lib/algo/finetune.py     | 21 ++++++++-------------
+ tests/test_dense_only.py | 28 +++++++++++++++++++++++++---
+ 2 files changed, 33 insertions(+), 16 deletions(-)
+
+diff --git a/lib/algo/finetune.py b/lib/algo/finetune.py
+index 2ebdfc4..25e82a0 100644
+--- a/lib/algo/finetune.py
++++ b/lib/algo/finetune.py
+@@ -228,11 +228,11 @@ def quantize_finetune_decoder_layer(mixed_layer, quant_order, idx, cb, args,
+                          quant_linear.SV.device).unsqueeze(-1)).reshape(
+                              quant_linear.SV.data.shape)).to(orig_dtype).cpu()
+             else:
+-                data['SU'] = quant_linear.SU.data.to(orig_dtype).cpu()
+-                data['SV'] = (quant_linear.SV.data / data['Wscale'].to(
+-                    quant_linear.SV.device)).to(orig_dtype).cpu()
++                data['SU'] = quant_linear.SU.detach().float().cpu().clone()
++                data['SV'] = (quant_linear.SV.detach() / data['Wscale'].to(
++                    quant_linear.SV.device)).float().cpu().clone()
+             if quant_linear.tlut is not None:
+-                data['tlut'] = quant_linear.tlut.data.to(orig_dtype).cpu()
++                data['tlut'] = quant_linear.tlut.detach().float().cpu().clone()
+             projection_payloads[name] = data
+ 
+     for linear_attr, name, _ih, _oh, _rcp in quant_order[:completed]:
+@@ -327,17 +327,13 @@ def quantize_finetune_decoder_layer(mixed_layer, quant_order, idx, cb, args,
+                 args.scale_override)
+             Wr /= Wscale
+ 
+-        transformed_hessian_jitter = 0.0
+         block_ldl = utils.block_LDL(HRr, args.td_y)
+         if block_ldl is None:
+-            # A high-dynamic-range PSD Hessian can lose positive definiteness
+-            # through cancellation in the FP32 randomized Hadamard transform.
+-            # Restore symmetry and regularize again in transformed coordinates.
++            # Finite-precision Hadamard transforms can lose positive definiteness.
++            # Restore symmetry and retry once with damping in these coordinates.
+             utils.clean()
+             HRr = (HRr + HRr.T) * 0.5
+-            transformed_hessian_jitter = args.sigma_reg
+-            HRr.diagonal().add_(
+-                HRr.diagonal().mean() * transformed_hessian_jitter)
++            HRr.diagonal().add_(HRr.diagonal().mean() * args.sigma_reg)
+             block_ldl = utils.block_LDL(HRr.contiguous(), args.td_y)
+         if block_ldl is None:
+             raise RuntimeError(
+@@ -400,7 +396,6 @@ def quantize_finetune_decoder_layer(mixed_layer, quant_order, idx, cb, args,
+             'SV': SV.to(orig_dtype).cpu(),
+             'Wscale': Wscale.cpu(),
+             'proxy_err': err.item(),
+-            'transformed_hessian_jitter': transformed_hessian_jitter,
+             'tlut': (
+                 cb.tlut.data.to(orig_dtype).cpu()
+                 if hasattr(cb, 'tlut') else None
+@@ -469,7 +464,7 @@ def quantize_finetune_decoder_layer(mixed_layer, quant_order, idx, cb, args,
+             atomic_torch_save(
+                 projection_payloads[name], f'{args.checkpoints}/{idx}_{name}.pt')
+ 
+-    mixed_layer = mixed_layer.to(orig_dtype).cpu()
++    mixed_layer = mixed_layer.cpu()
+     utils.clean()
+     torch.set_grad_enabled(False)
+ 
+diff --git a/tests/test_dense_only.py b/tests/test_dense_only.py
+index 5557f9c..79c1818 100644
+--- a/tests/test_dense_only.py
++++ b/tests/test_dense_only.py
+@@ -122,8 +122,9 @@ def test_quantlut_sym_uses_explicit_tlut_path(monkeypatch, tmp_path):
+ 
+ 
+ @pytest.mark.parametrize("rcp", ["row", "col"])
++@pytest.mark.parametrize("off_diagonal, expected_attempts", [(0.0, 1), (1.005, 2), (1.1, 2)])
+ def test_quantize_recovers_transformed_hessian_without_tp_reshape(
+-    monkeypatch, tmp_path, rcp
++    monkeypatch, tmp_path, rcp, off_diagonal, expected_attempts
+ ):
+     from lib.algo import finetune
+ 
+@@ -145,10 +146,18 @@ def test_quantize_recovers_transformed_hessian_without_tp_reshape(
+             return trellis.to(torch.int16)
+ 
+     hessian = torch.eye(4)
+-    hessian[0, 1] = hessian[1, 0] = 1.005
++    hessian[0, 1] = hessian[1, 0] = off_diagonal
+     lower = torch.tril_indices(4, 4)
+     torch.save({"flatH": hessian[lower[0], lower[1]], "n": 4}, tmp_path / "3_h.pt")
+ 
++    attempts = []
++    block_ldl = finetune.utils.block_LDL
++
++    def factor(matrix, block_size):
++        attempts.append(matrix.clone())
++        return block_ldl(matrix, block_size)
++
++    monkeypatch.setattr(finetune.utils, "block_LDL", factor)
+     kernel_modes = []
+     monkeypatch.setattr(finetune.utils, "regularize_H", lambda value, _sigma: value)
+     monkeypatch.setattr(finetune.utils, "matmul_hadUt", lambda value: value)
+@@ -182,6 +191,15 @@ def test_quantize_recovers_transformed_hessian_without_tp_reshape(
+ 
+     grad_enabled = torch.is_grad_enabled()
+     try:
++        if off_diagonal > 1.01:
++            with pytest.raises(RuntimeError, match='block LDL failed'):
++                finetune.quantize_finetune_decoder_layer(
++                    Layer(), (("proj", "proj", "h", "unused", rcp),), 3,
++                    Codebook(), args, torch.device("cpu"), None, None,
++                )
++            assert len(attempts) == expected_attempts
++            assert not kernel_modes
++            return
+         finetune.quantize_finetune_decoder_layer(
+             Layer(), (("proj", "proj", "h", "unused", rcp),), 3,
+             Codebook(), args, torch.device("cpu"), None, None,
+@@ -189,11 +207,15 @@ def test_quantize_recovers_transformed_hessian_without_tp_reshape(
+     finally:
+         torch.set_grad_enabled(grad_enabled)
+ 
++    assert len(attempts) == expected_attempts
++    if expected_attempts == 2:
++        expected = (attempts[0] + attempts[0].T) * 0.5
++        expected.diagonal().add_(expected.diagonal().mean() * args.sigma_reg)
++        torch.testing.assert_close(attempts[1], expected)
+     checkpoint = torch.load(tmp_path / "3_proj.pt", weights_only=True)
+     generator = torch.Generator().manual_seed(14)
+     expected_su = (torch.randn(4, generator=generator).sign() + 1e-5).sign()
+     assert torch.equal(checkpoint["SU"], expected_su)
+-    assert checkpoint["transformed_hessian_jitter"] == 1e-2
+     assert checkpoint["rcp"] == 0
+     assert kernel_modes == [False]
+ 

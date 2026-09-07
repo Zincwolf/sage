@@ -1,12 +1,10 @@
 from pathlib import Path
 
-import pytest
 import torch
 import torch.distributed as dist
 from torch import nn
 from torch.multiprocessing.spawn import spawn
 
-from weight_vq.qtip.calibration import local_batch_slice
 from weight_vq.qtip.distributed import DistributedContext
 from weight_vq.qtip.hessian import MaskedHessianCollector
 
@@ -29,13 +27,6 @@ def _collective_worker(rank: int, rendezvous: str, output: str) -> None:
         )
     finally:
         dist.destroy_process_group()
-
-
-def test_local_batch_slice_partitions_global_minibatch() -> None:
-    assert local_batch_slice(16, 0, 4) == slice(0, 4)
-    assert local_batch_slice(16, 3, 4) == slice(12, 16)
-    with pytest.raises(ValueError, match="not divisible"):
-        local_batch_slice(15, 0, 4)
 
 
 def test_collectives_aggregate_raw_hessian_and_gradients(tmp_path: Path) -> None:

@@ -35,7 +35,10 @@ class DistributedContext:
         if self.world_size == 1:
             return
         for parameter in module.parameters():
-            if parameter.grad is not None:
+            if parameter.requires_grad:
+                # A shuffled global batch can contain no samples owned by a rank.
+                if parameter.grad is None:
+                    parameter.grad = torch.zeros_like(parameter)
                 dist.all_reduce(parameter.grad, op=dist.ReduceOp.SUM)
 
     def barrier(self) -> None:
@@ -51,7 +54,11 @@ def process_group(
     torch.cuda.set_device(device)
     if len(devices) > 1:
         dist.init_process_group(
-            backend="nccl", init_method=rendezvous.as_uri(), rank=rank, world_size=len(devices)
+            backend="nccl",
+            init_method=rendezvous.as_uri(),
+            rank=rank,
+            world_size=len(devices),
+            device_id=device,
         )
     try:
         yield DistributedContext(rank, len(devices), device)

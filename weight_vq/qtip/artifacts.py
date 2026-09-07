@@ -40,8 +40,10 @@ def projection_paths(layer_index: int, checkpoint_dir: str | Path) -> tuple[Path
 
 def layer_complete(layer_index: int, checkpoint_dir: str | Path) -> bool:
     checkpoint_dir = Path(checkpoint_dir)
-    return (checkpoint_dir / f"{layer_index}.complete").is_file() and all(
-        path.is_file() for path in projection_paths(layer_index, checkpoint_dir)
+    return (
+        (checkpoint_dir / f"{layer_index}.complete").is_file()
+        and (checkpoint_dir / f"{layer_index}.auxiliary.pt").is_file()
+        and all(path.is_file() for path in projection_paths(layer_index, checkpoint_dir))
     )
 
 
@@ -56,7 +58,9 @@ def atomic_write_completion(layer_index: int, checkpoint_dir: str | Path) -> Non
     if missing:
         raise RuntimeError(f"layer {layer_index} is missing QTIP checkpoints: {missing}")
     marker = checkpoint_dir / f"{layer_index}.complete"
-    utils.atomic_write_text(marker, "complete\n")
+    if not (checkpoint_dir / f"{layer_index}.auxiliary.pt").is_file():
+        raise RuntimeError(f"layer {layer_index} is missing auxiliary state")
+    utils.atomic_write_text(marker, "blockwise-full-state-v4\n")
 
 
 def reconstruct_dense_weight(saved: dict[str, Any], config: dict[str, Any]) -> torch.Tensor:

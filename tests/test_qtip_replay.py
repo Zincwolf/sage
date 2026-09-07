@@ -1,121 +1,59 @@
-from pathlib import Path
-
 import torch
-from torch import nn
 from transformers import Qwen3Config, Qwen3ForCausalLM
 
-from weight_vq.qtip.config import QTIPConfig
 from weight_vq.qtip.hessian import LayerHessianCollectors
-from weight_vq.qtip.replay import BatchContext, LayerReplay, ReplayState, capture_replay
+from weight_vq.qtip.replay import capture_replay
 
 
-def tiny_qwen() -> Qwen3ForCausalLM:
-    return Qwen3ForCausalLM(
-        Qwen3Config(
-            vocab_size=64,
-            hidden_size=16,
-            intermediate_size=32,
-            num_hidden_layers=2,
-            num_attention_heads=2,
-            num_key_value_heads=1,
-            head_dim=8,
-        )
-    ).eval()
-
-
-def config(tmp_path: Path, calibration: Path) -> QTIPConfig:
-    return QTIPConfig(
-        model=tmp_path / "model",
-        calibration=calibration,
-        output_dir=tmp_path,
-        devices=[0],
-        train_samples=4,
-        validation_samples=2,
-        batch_size=2,
+def tiny_qwen():
+    config = Qwen3Config(
+        vocab_size=64,
+        hidden_size=32,
+        intermediate_size=64,
+        num_hidden_layers=2,
+        num_attention_heads=4,
+        num_key_value_heads=2,
+        head_dim=8,
     )
+    config._attn_implementation = "sdpa"
+    return Qwen3ForCausalLM(config).eval()
 
 
-def test_compact_replay_matches_native_qwen_decoder(tmp_path: Path) -> None:
+def test_replay_matches_native_qwen_sdpa_and_teacher_remains_original():
+    model = tiny_qwen()
     tokens = torch.randint(0, 64, (4, 8))
-    calibration = tmp_path / "calibration.pt"
-    torch.save({"train": tokens, "validation": tokens[:2]}, calibration)
-    model = tiny_qwen()
-
-    expected = [
-        model.model(input_ids=batch, use_cache=False).last_hidden_state for batch in tokens.split(2)
-    ]
-    state = capture_replay(
-        model, config(tmp_path, calibration), family="qwen3", split="train", device="cpu"
-    )
-
-    assert len(state.inputs) == 2
-    assert all(context.attention_mask is None for context in state.contexts)
-    for index, layer in enumerate(model.model.layers):
-        collectors = LayerHessianCollectors(layer) if index == 0 else None
-        state.forward_original(layer, index, device="cpu", collectors=collectors)
-        if collectors is not None:
-            assert all(payload["ct"] == 32 for payload in collectors.close().values())
-
-    for actual, native in zip(state.inputs, expected, strict=True):
-        torch.testing.assert_close(model.model.norm(actual), native)
-
-
-def test_rank_local_capture_slices_each_global_batch(tmp_path: Path) -> None:
-    tokens = torch.arange(4 * 8).reshape(4, 8) % 64
-    calibration = tmp_path / "calibration.pt"
-    torch.save({"train": tokens, "validation": tokens[:2]}, calibration)
-    model = tiny_qwen()
-
-    state = capture_replay(
-        model,
-        config(tmp_path, calibration),
-        family="qwen3",
-        split="train",
-        device="cpu",
-        rank=1,
-        world_size=2,
-    )
-
-    expected = model.model.embed_tokens(tokens[[1, 3]])
-    torch.testing.assert_close(torch.cat(state.inputs), expected)
-
-
-def test_reconstruction_masks_padding_and_deepstack() -> None:
-    model = tiny_qwen()
-    layer = model.model.layers[0]
-    valid_mask = torch.tensor([[True, False, True]])
-    context = BatchContext(
-        attention_mask=valid_mask,
-        position_ids=None,
-        valid_mask=valid_mask,
-        visual_pos_mask=torch.tensor([[False, True, False]]),
-        deepstack_visual_embeds=[torch.ones(1, 16)],
-    )
-    source = torch.randn(1, 3, 16)
-    state = ReplayState("qwen3", model.model.config, model.model.rotary_emb, [source], [context])
     with torch.no_grad():
-        target = state._forward(layer, source, 0, "cpu")
-    corrupted = target.clone()
-    corrupted[:, 1] = 1000
-    replay = LayerReplay(state, 0, [source], [corrupted])
+        expected = model.model(input_ids=tokens, use_cache=False).last_hidden_state
+    state = capture_replay(model, tokens, device="cpu", microbatch_size=1)
+    for layer in model.model.layers:
+        collector = LayerHessianCollectors(layer, include_padding=True)
+        replay = state.forward_original(layer, device="cpu", collectors=collector)
+        for payload in collector.close().values():
+            assert payload["ct"] == 32
+        replay.loss_parts(layer, torch.arange(4), "cpu")[0].backward()
+        assert layer.get_parameter("self_attn.q_norm.weight").grad is not None
+        assert not state.inputs.requires_grad
+    torch.testing.assert_close(model.model.norm(state.inputs), expected)
 
-    assert replay.loss(layer, 0, "cpu", mask_padding=True).item() == 0
-    advanced = state._apply_deepstack(target, context, 0)
-    torch.testing.assert_close(advanced[:, 0], target[:, 0])
-    torch.testing.assert_close(advanced[:, 1], target[:, 1] + 1)
-    assert context.deepstack_visual_embeds is None
 
-
-def test_reconstruction_loss_keeps_gradients() -> None:
+def test_hessian_chunking_preserves_raw_moments_with_unequal_chunks():
     model = tiny_qwen()
-    layer: nn.Module = model.model.layers[0]
-    context = BatchContext(None, None, torch.ones(1, 3, dtype=torch.bool))
-    source = torch.randn(1, 3, 16)
-    state = ReplayState("qwen3", model.model.config, model.model.rotary_emb, [source], [context])
-    with torch.no_grad():
-        target = state._forward(layer, source, 0, "cpu")
-    replay = LayerReplay(state, 0, [source], [target])
+    tokens = torch.randint(0, 64, (5, 8))
 
-    replay.loss(layer, 0, "cpu", mask_padding=True).backward()
+    def collect(chunks):
+        result = {}
+        for chunk in chunks:
+            state = capture_replay(model, chunk, device="cpu", microbatch_size=1)
+            for index, layer in enumerate(model.model.layers):
+                collectors = LayerHessianCollectors(layer, include_padding=True)
+                state.forward_original(layer, device="cpu", collectors=collectors)
+                for name, collector in collectors.collectors.items():
+                    matrix, count = collector.close_raw()
+                    previous, tokens_seen = result.get((index, name), (torch.zeros_like(matrix), 0))
+                    result[index, name] = previous + matrix, tokens_seen + count
+        return result
 
-    assert any(parameter.grad is not None for parameter in layer.parameters())
+    expected, actual = collect([tokens]), collect(tokens.split(2))
+    for key, (matrix, count) in expected.items():
+        assert count == actual[key][1] == 40
+        torch.testing.assert_close(matrix, actual[key][0])

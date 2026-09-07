@@ -23,6 +23,8 @@ ConfigType = type[Any]
 STAGES: dict[tuple[str, str], tuple[Stage, ConfigType]] = {
     ("data", "calibration"): (calibration.main, CalibrationConfig),
     ("data", "vlm-calibration"): (vlm_calibration.main, VLMCalibrationConfig),
+    ("qtip", "calibration"): (qtip_pipeline.calibration, QTIPConfig),
+    ("qtip", "run"): (qtip_pipeline.run, QTIPConfig),
     ("qtip", "hessian"): (qtip_pipeline.hessian, QTIPConfig),
     ("qtip", "quantize"): (qtip_pipeline.quantize, QTIPConfig),
     ("qtip", "export"): (qtip_pipeline.export, QTIPConfig),

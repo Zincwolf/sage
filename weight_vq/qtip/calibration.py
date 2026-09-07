@@ -1,97 +1,96 @@
-"""Qwen3-VL calibration batches backed by the frozen COCO manifest."""
+"""Independent RedPajama Hessian and block-reconstruction samples."""
 
 from __future__ import annotations
 
-import json
-from collections.abc import Iterator
-from pathlib import Path
 from typing import Any
 
 import torch
-from PIL import Image
-from transformers import AutoProcessor
+from datasets import Dataset, DatasetInfo, concatenate_datasets
+from transformers import AutoTokenizer
+
+from weight_vq import utils
+from weight_vq.qtip.config import QTIPConfig
 
 
-def _conversation(record: dict[str, Any], image: Image.Image) -> list[dict[str, Any]]:
-    prompt = record["conversations"][0]["value"].replace("<image>", "").strip()
-    caption = record["conversations"][1]["value"].strip()
-    return [
+def sample_documents(
+    dataset: Dataset,
+    tokenizer: Any,
+    *,
+    samples: int,
+    length: int,
+    concatenate: bool,
+    generator: torch.Generator,
+) -> torch.Tensor:
+    result = torch.empty(samples * length, dtype=torch.int64)
+    written = 0
+    # Process a document at a time: full-document tokenization never creates a
+    # padded batch as large as its longest outlier, or stores a corpus-sized list.
+    while written < result.numel():
+        index = torch.randint(len(dataset), (1,), generator=generator).item()
+        encoded = tokenizer(
+            dataset[int(index)]["text"],
+            truncation=not concatenate,
+            **({} if concatenate else {"max_length": length}),
+            padding=False,
+            return_attention_mask=False,
+        )["input_ids"]
+        if not concatenate and len(encoded) < length:
+            continue
+        count = min(len(encoded), result.numel() - written)
+        result[written : written + count] = torch.tensor(encoded[:count], dtype=torch.int64)
+        written += count
+    return result.reshape(samples, length)
+
+
+def calibration(config: QTIPConfig) -> None:
+    protocol = config.calibration_recipe()
+    if config.calibration.exists():
+        load_calibration(config)
+        return
+    info = DatasetInfo.from_directory(str(config.dataset))
+    files = sorted(config.dataset.glob("*-train-*-of-*.arrow"))
+    dataset = concatenate_datasets([Dataset.from_file(str(path), info=info) for path in files])
+    tokenizer = AutoTokenizer.from_pretrained(config.model, local_files_only=True)
+    generator = torch.Generator().manual_seed(config.seed)
+    hessian = sample_documents(
+        dataset,
+        tokenizer,
+        samples=config.hessian_samples,
+        length=config.hessian_sequence_length,
+        concatenate=True,
+        generator=generator,
+    )
+    reconstruction = sample_documents(
+        dataset,
+        tokenizer,
+        samples=config.train_samples + config.validation_samples,
+        length=config.sequence_length,
+        concatenate=False,
+        generator=generator,
+    )
+    utils.atomic_torch_save(
         {
-            "role": "user",
-            "content": [{"type": "image", "image": image}, {"type": "text", "text": prompt}],
+            "protocol": protocol,
+            "source": {
+                "dataset_name": info.dataset_name,
+                "description": info.description,
+                "homepage": info.homepage,
+                "download_sources": list(info.download_checksums or {}),
+                "rows": len(dataset),
+                "upstream_sample_identity_verified": False,
+                "tokenizer_class": type(tokenizer).__name__,
+                "tokenizer_name_or_path": tokenizer.name_or_path,
+            },
+            "hessian": hessian,
+            "train": reconstruction[: config.train_samples].clone(),
+            "validation": reconstruction[config.train_samples :].clone(),
         },
-        {"role": "assistant", "content": [{"type": "text", "text": caption}]},
-    ]
+        config.calibration,
+    )
 
 
-def local_batch_slice(size: int, rank: int, world_size: int) -> slice:
-    local_size, remainder = divmod(size, world_size)
-    if remainder:
-        raise ValueError(f"global batch of {size} samples is not divisible by {world_size} ranks")
-    start = rank * local_size
-    return slice(start, start + local_size)
-
-
-class CocoCalibrationBatches:
-    def __init__(
-        self,
-        manifest_path: Path,
-        *,
-        model_path: Path,
-        split: str,
-        batch_size: int,
-        limit: int,
-        rank: int = 0,
-        world_size: int = 1,
-    ) -> None:
-        manifest = json.loads(manifest_path.read_text())
-        self.records = []
-        for source in manifest["records"]:
-            if source["split"] != split:
-                continue
-            record = dict(source)
-            image = Path(record["image"])
-            record["image"] = str(image if image.is_absolute() else manifest_path.parent / image)
-            self.records.append(record)
-        self.records = self.records[:limit]
-        self.batch_size = batch_size
-        self.rank = rank
-        self.world_size = world_size
-        self.processor = AutoProcessor.from_pretrained(
-            model_path, local_files_only=True, trust_remote_code=True
-        )
-        tokenizer = getattr(self.processor, "tokenizer", None)
-        if tokenizer is not None and tokenizer.pad_token_id is None:
-            tokenizer.pad_token = tokenizer.eos_token
-        template = getattr(self.processor, "chat_template", None)
-        if template is None and tokenizer is not None:
-            template = getattr(tokenizer, "chat_template", None)
-        self.template_kwargs = (
-            {"enable_thinking": False} if template and "enable_thinking" in template else {}
-        )
-
-    def __iter__(self) -> Iterator[dict[str, torch.Tensor]]:
-        for start in range(0, len(self.records), self.batch_size):
-            global_records = self.records[start : start + self.batch_size]
-            records = global_records[
-                local_batch_slice(len(global_records), self.rank, self.world_size)
-            ]
-            images = [Image.open(record["image"]).convert("RGB") for record in records]
-            try:
-                conversations = [
-                    _conversation(record, image)
-                    for record, image in zip(records, images, strict=True)
-                ]
-                batch = self.processor.apply_chat_template(
-                    conversations,
-                    tokenize=True,
-                    add_generation_prompt=False,
-                    padding=True,
-                    return_dict=True,
-                    return_tensors="pt",
-                    **self.template_kwargs,
-                )
-            finally:
-                for image in images:
-                    image.close()
-            yield {key: value for key, value in batch.items() if isinstance(value, torch.Tensor)}
+def load_calibration(config: QTIPConfig) -> dict[str, Any]:
+    artifact = torch.load(config.calibration, map_location="cpu", weights_only=True, mmap=True)
+    if artifact["protocol"] != config.calibration_recipe():
+        raise RuntimeError("calibration protocol differs; use a new output_dir")
+    return artifact
