@@ -2,11 +2,9 @@
 
 from __future__ import annotations
 
-import csv
 import json
 import os
 import shutil
-import sys
 import tempfile
 from operator import attrgetter
 from pathlib import Path
@@ -375,41 +373,14 @@ def validate(config: QTIPConfig) -> None:
     family, model_layers = _model_contract(config.model)
     start, end = layer_range(config, model_layers)
     model_loader = AutoModelForCausalLM if family == "qwen3" else AutoModelForImageTextToText
-    model = model_loader.from_pretrained(
-        config.exported_model,
-        dtype="auto",
-        device_map=0,
-        low_cpu_mem_usage=True,
-        local_files_only=True,
-        trust_remote_code=True,
-    )
-    layers = _get_layers(model, family)
     layer_prefix = "model.layers" if family == "qwen3" else "model.language_model.layers"
-    writer = csv.writer(sys.stdout, lineterminator="\n")
-    writer.writerow(("layer", "p01", "p50", "p99", "abs_p99", "abs_p999", "abs_max"))
-    with torch.no_grad():
-        for index in range(start, end):
-            layer = layers[index]
-            for attribute, _short, _hessian, _parallel in PROJECTIONS:
-                module: Any = layer
-                for part in attribute.split("."):
-                    module = getattr(module, part)
-                weight = module.weight.detach().flatten().float()
-                if not torch.isfinite(weight).all():
-                    raise ValueError(f"non-finite weight: language layer {index} {attribute}")
-                stride = max(1, (weight.numel() + 999_999) // 1_000_000)
-                sample = weight[::stride]
-                quantiles = torch.quantile(
-                    sample, torch.tensor([0.01, 0.5, 0.99], device=sample.device)
-                )
-                abs_quantiles = torch.quantile(
-                    sample.abs(), torch.tensor([0.99, 0.999], device=sample.device)
-                )
-                writer.writerow(
-                    (
-                        f"{layer_prefix}.{index}.{attribute}",
-                        *(f"{value.item():.5e}" for value in quantiles),
-                        *(f"{value.item():.5e}" for value in abs_quantiles),
-                        f"{weight.abs().max().item():.5e}",
-                    )
-                )
+    utils.validate_dense_model(
+        config.exported_model,
+        model_loader=model_loader,
+        weights=lambda model: (
+            (name, model.get_parameter(f"{name}.weight"))
+            for index in range(start, end)
+            for attribute, _short, _hessian, _parallel in PROJECTIONS
+            for name in (f"{layer_prefix}.{index}.{attribute}",)
+        ),
+    )

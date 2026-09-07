@@ -1,12 +1,12 @@
 import csv
 import os
 import sys
-from contextlib import nullcontext
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
 from typing import Any
 
 import pytest
+from torch import nn
 
 from weight_vq.config import CalibrationMetadata
 from weight_vq.sphquant.config import SPHQuantConfig
@@ -202,56 +202,25 @@ def test_export_runs_shared_converter_in_staging_directory(
     assert sys.argv is original_argv
 
 
-class FakeScalar:
-    def __init__(self, value: float) -> None:
-        self.value = value
-
-    def item(self) -> float:
-        return self.value
-
-
-class FakeWeight:
-    device = "cuda:0"
-
-    def detach(self) -> "FakeWeight":
-        return self
-
-    def flatten(self) -> "FakeWeight":
-        return self
-
-    def float(self) -> "FakeWeight":
-        return self
-
-    def numel(self) -> int:
-        return 4
-
-    def __getitem__(self, _key: object) -> "FakeWeight":
-        return self
-
-    def max(self) -> FakeScalar:
-        return FakeScalar(2.0)
-
-    def abs(self) -> "FakeWeight":
-        return self
+class TextModel(nn.Module):
+    def __init__(self) -> None:
+        super().__init__()
+        self.model = nn.Module()
+        layer = nn.Module()
+        layer.self_attn = nn.Module()
+        layer.mlp = nn.Module()
+        for projection in PROJECTIONS:
+            parent, name = projection.split(".")
+            layer.get_submodule(parent).add_module(name, nn.Linear(2, 2, bias=False))
+        self.model.layers = nn.ModuleList([layer])
 
 
-class Projection:
-    weight = FakeWeight()
-
-
-class Layer:
-    self_attn = SimpleNamespace(
-        q_proj=Projection(), k_proj=Projection(), v_proj=Projection(), o_proj=Projection()
-    )
-    mlp = SimpleNamespace(gate_proj=Projection(), up_proj=Projection(), down_proj=Projection())
-
-
-class TextModel:
-    model = SimpleNamespace(layers=[Layer()])
-
-
-class VLMModel:
-    model = SimpleNamespace(language_model=SimpleNamespace(layers=[Layer()]))
+class VLMModel(TextModel):
+    def __init__(self) -> None:
+        super().__init__()
+        backbone = self.model
+        self.model = nn.Module()
+        self.model.language_model = backbone
 
 
 @pytest.mark.parametrize(
@@ -280,17 +249,9 @@ def test_validate_uses_family_hf_api_and_target_statistics(
             loads.append(("vlm", path, kwargs, os.environ.get("CUDA_VISIBLE_DEVICES")))
             return model_class()
 
-    fake_torch = ModuleType("torch")
-    fake_torch.isfinite = lambda _value: SimpleNamespace(all=lambda: True)  # type: ignore[attr-defined]
-    fake_torch.no_grad = nullcontext  # type: ignore[attr-defined]
-    fake_torch.tensor = lambda values, **_kwargs: values  # type: ignore[attr-defined]
-    fake_torch.quantile = lambda _sample, values: [  # type: ignore[attr-defined]
-        FakeScalar(value) for value in values
-    ]
     fake_transformers = ModuleType("transformers")
     fake_transformers.AutoModelForCausalLM = AutoCausal  # type: ignore[attr-defined]
     fake_transformers.AutoModelForImageTextToText = AutoVLM  # type: ignore[attr-defined]
-    monkeypatch.setitem(sys.modules, "torch", fake_torch)
     monkeypatch.setitem(sys.modules, "transformers", fake_transformers)
     monkeypatch.setattr("weight_vq.sphquant.pipeline._model_contract", lambda _model: (family, 36))
 

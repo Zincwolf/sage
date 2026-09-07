@@ -2,15 +2,15 @@
 
 from __future__ import annotations
 
-import csv
 import os
 import shutil
 import sys
 from collections.abc import Generator
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Literal
+from typing import Literal
 
+from weight_vq import utils
 from weight_vq.calibration import load_calibration_metadata
 from weight_vq.sphquant.config import SPHQuantConfig
 
@@ -196,52 +196,17 @@ def validate(config: SPHQuantConfig) -> None:
     family, model_layers = _model_contract(config.model)
     target_layers = _target_layers(config, model_layers)
     with _physical_device(config.device):
-        import torch
         from transformers import AutoModelForCausalLM, AutoModelForImageTextToText
 
-        loading_arguments = {
-            "dtype": "auto",
-            "device_map": 0,
-            "low_cpu_mem_usage": True,
-            "local_files_only": True,
-            "trust_remote_code": True,
-        }
-        if family == "qwen3":
-            model = AutoModelForCausalLM.from_pretrained(config.exported_model, **loading_arguments)
-            layers = model.model.layers
-            layer_prefix = "model.layers"
-        else:
-            model = AutoModelForImageTextToText.from_pretrained(
-                config.exported_model, **loading_arguments
-            )
-            layers = model.model.language_model.layers
-            layer_prefix = "model.language_model.layers"
-
-        writer = csv.writer(sys.stdout, lineterminator="\n")
-        writer.writerow(("layer", "p01", "p50", "p99", "abs_p99", "abs_p999", "abs_max"))
-        with torch.no_grad():
-            for index in target_layers:
-                layer = layers[index]
-                for projection in PROJECTIONS:
-                    module: Any = layer
-                    for part in projection.split("."):
-                        module = getattr(module, part)
-                    weight = module.weight.detach().flatten().float()
-                    if not torch.isfinite(weight).all():
-                        raise ValueError(f"non-finite weight: language layer {index} {projection}")
-                    stride = max(1, (weight.numel() + 999_999) // 1_000_000)
-                    sample = weight[::stride]
-                    quantiles = torch.quantile(
-                        sample, torch.tensor([0.01, 0.5, 0.99], device=sample.device)
-                    )
-                    abs_quantiles = torch.quantile(
-                        sample.abs(), torch.tensor([0.99, 0.999], device=sample.device)
-                    )
-                    writer.writerow(
-                        (
-                            f"{layer_prefix}.{index}.{projection}",
-                            *(f"{value.item():.5e}" for value in quantiles),
-                            *(f"{value.item():.5e}" for value in abs_quantiles),
-                            f"{weight.abs().max().item():.5e}",
-                        )
-                    )
+        model_loader = AutoModelForCausalLM if family == "qwen3" else AutoModelForImageTextToText
+        layer_prefix = "model.layers" if family == "qwen3" else "model.language_model.layers"
+        utils.validate_dense_model(
+            config.exported_model,
+            model_loader=model_loader,
+            weights=lambda model: (
+                (name, model.get_parameter(f"{name}.weight"))
+                for index in target_layers
+                for projection in PROJECTIONS
+                for name in (f"{layer_prefix}.{index}.{projection}",)
+            ),
+        )

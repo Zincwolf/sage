@@ -1,7 +1,6 @@
 import csv
-from contextlib import nullcontext
 from pathlib import Path
-from types import ModuleType, SimpleNamespace
+from types import SimpleNamespace
 from typing import Any, cast
 
 import pytest
@@ -196,50 +195,6 @@ def test_export_uses_family_hf_apis_and_injects_dense_weights(
     torch.testing.assert_close(layer.self_attn.q_proj.weight, torch.ones(1, 1))
 
 
-class FakeScalar:
-    def __init__(self, value: float) -> None:
-        self.value = value
-
-    def item(self) -> float:
-        return self.value
-
-
-class FakeWeight:
-    device = "cuda:0"
-
-    def detach(self) -> "FakeWeight":
-        return self
-
-    def flatten(self) -> "FakeWeight":
-        return self
-
-    def float(self) -> "FakeWeight":
-        return self
-
-    def numel(self) -> int:
-        return 4
-
-    def __getitem__(self, _key: object) -> "FakeWeight":
-        return self
-
-    def abs(self) -> "FakeWeight":
-        return self
-
-    def max(self) -> FakeScalar:
-        return FakeScalar(2.0)
-
-
-class Projection:
-    weight = FakeWeight()
-
-
-class Layer:
-    self_attn = SimpleNamespace(
-        v_proj=Projection(), q_proj=Projection(), k_proj=Projection(), o_proj=Projection()
-    )
-    mlp = SimpleNamespace(up_proj=Projection(), gate_proj=Projection(), down_proj=Projection())
-
-
 @pytest.mark.parametrize(
     ("family", "model_api", "layer_prefix"),
     [
@@ -258,25 +213,23 @@ def test_validate_uses_family_model_and_prints_target_statistics(
     qtip_config = config(tmp_path)
     loads: list[dict[str, Any]] = []
 
+    model = nn.Module()
+    backbone = nn.Module()
+    backbone.layers = nn.ModuleList(ExportLayer() for _ in range(10))
+    if family == "qwen3":
+        model.model = backbone
+    else:
+        model.model = nn.Module()
+        model.model.language_model = backbone
+
     class AutoModel:
         @staticmethod
-        def from_pretrained(_path: Path, **kwargs: Any) -> object:
+        def from_pretrained(_path: Path, **kwargs: Any) -> nn.Module:
             loads.append(kwargs)
-            return object()
+            return model
 
-    fake_torch = ModuleType("torch")
-    fake_torch.no_grad = nullcontext  # type: ignore[attr-defined]
-    fake_torch.isfinite = lambda _value: SimpleNamespace(all=lambda: True)  # type: ignore[attr-defined]
-    fake_torch.tensor = lambda values, **_kwargs: values  # type: ignore[attr-defined]
-    fake_torch.quantile = lambda _sample, values: [  # type: ignore[attr-defined]
-        FakeScalar(value) for value in values
-    ]
-    monkeypatch.setattr("weight_vq.qtip.pipeline.torch", fake_torch)
     monkeypatch.setattr("weight_vq.qtip.pipeline._model_contract", lambda _model: (family, 36))
     monkeypatch.setattr(f"weight_vq.qtip.pipeline.{model_api}", AutoModel)
-    monkeypatch.setattr(
-        "weight_vq.qtip.pipeline._get_layers", lambda _model, _family: [Layer() for _ in range(36)]
-    )
 
     validate(qtip_config)
 
