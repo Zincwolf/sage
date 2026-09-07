@@ -10,6 +10,7 @@ from typing import Any, Literal, Protocol, cast
 import torch
 from accelerate.utils import send_to_device
 from torch import nn
+from transformers import __version__ as transformers_version
 from transformers.masking_utils import create_causal_mask, create_sliding_window_causal_mask
 
 from weight_vq.qtip.calibration import CocoCalibrationBatches, local_batch_slice
@@ -131,19 +132,23 @@ class ReplayState:
         attention_mask = (
             None if context.attention_mask is None else context.attention_mask.to(hidden.device)
         )
-        mask_factory = (
+        mask_factory: Any = (
             create_sliding_window_causal_mask
             if getattr(layer, "attention_type", None) == "sliding_attention"
             else create_causal_mask
         )
-        causal_mask = mask_factory(
-            config=self.model_config,
-            input_embeds=hidden,
-            attention_mask=attention_mask,
-            cache_position=cache_position,
-            past_key_values=None,
-            position_ids=text_position_ids,
-        )
+        mask_kwargs = {
+            "config": self.model_config,
+            "attention_mask": attention_mask,
+            "past_key_values": None,
+            "position_ids": text_position_ids,
+        }
+        if int(transformers_version.split(".", 1)[0]) >= 5:
+            mask_kwargs["inputs_embeds"] = hidden
+        else:
+            mask_kwargs["input_embeds"] = hidden
+            mask_kwargs["cache_position"] = cache_position
+        causal_mask = mask_factory(**mask_kwargs)
         position_embeddings = self.rotary_emb.to(hidden.device)(hidden, position_ids)
         return {
             "attention_mask": causal_mask,

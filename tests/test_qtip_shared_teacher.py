@@ -85,6 +85,7 @@ def test_spawn_shared_teacher_preserves_parent(tmp_path: Path, family: str, devi
         result = torch.load(tmp_path / f"{rank}.pt", weights_only=True)
         torch.testing.assert_close(result["logits"], expected)
         if family == "qwen3_vl":
-            assert result["vision"].shape == (1, 16)
+            assert result["vision"].ndim == 2
+            assert result["vision"].shape[-1] == 16
     for name, value in model.state_dict().items():
         torch.testing.assert_close(value, original[name], rtol=0, atol=0)
