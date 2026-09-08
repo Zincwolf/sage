@@ -1,8 +1,8 @@
 import torch
 from transformers import Qwen3Config, Qwen3ForCausalLM
 
-from weight_vq.qtip.hessian import LayerHessianCollectors
-from weight_vq.qtip.replay import capture_replay
+from weight_vq.blockwise.hessian import LayerHessianCollectors
+from weight_vq.blockwise.replay import capture_replay
 
 
 def tiny_qwen():

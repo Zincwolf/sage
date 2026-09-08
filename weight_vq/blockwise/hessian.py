@@ -1,18 +1,21 @@
-"""QTIP's projection selection over the shared Hessian collectors."""
+"""Decoder projection selection over the shared Hessian collectors."""
 
 from __future__ import annotations
 
 from operator import attrgetter
 from typing import cast
 
+import torch
 from torch import nn
 
 from weight_vq.hessian import LinearHessianCollectors, MaskedHessianCollector
 
 
 class LayerHessianCollectors(LinearHessianCollectors):
-    def __init__(self, layer: nn.Module, *, include_padding: bool = False) -> None:
-        super().__init__(collector_modules(layer), include_padding=include_padding)
+    def __init__(
+        self, layer: nn.Module, *, include_padding: bool = False, dtype: torch.dtype = torch.float32
+    ) -> None:
+        super().__init__(collector_modules(layer), include_padding=include_padding, dtype=dtype)
 
 
 def collector_modules(layer: nn.Module) -> dict[str, nn.Linear]:

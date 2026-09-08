@@ -5,6 +5,7 @@ import pytest
 from weight_vq import cli
 from weight_vq.config import CalibrationConfig, TokenizerConfig, VLMCalibrationConfig
 from weight_vq.qtip.config import QTIPConfig
+from weight_vq.quip_sharp.config import QuIPSharpConfig
 from weight_vq.sphquant.config import SPHQuantConfig
 
 
@@ -155,6 +156,25 @@ def test_cli_loads_shared_flat_sphquant_config(
             calibration_limit=32,
         )
     ]
+
+
+@pytest.mark.parametrize(
+    "stage", ["calibration", "hessian", "quantize", "export", "validate", "run"]
+)
+def test_quip_sharp_shared_stages(monkeypatch, tmp_path, stage):
+    path = tmp_path / "quip.yaml"
+    path.write_text(
+        "model: /models/qwen3\ndataset: /data/rp\noutput_dir: /outputs/quip\ndevices: [0, 1]\n"
+    )
+    received = []
+    function, config_type = cli.STAGES[("quip-sharp", stage)]
+    assert callable(function)
+    assert config_type is QuIPSharpConfig
+    monkeypatch.setitem(cli.STAGES, ("quip-sharp", stage), (received.append, config_type))
+    cli.main(["quip-sharp", stage, "--config", str(path)])
+    assert received[0].hessian_samples == 6144
+    assert received[0].hessian_sequence_length == 2048
+    assert received[0].devices == [0, 1]
 
 
 def test_cli_has_nested_help(capsys: pytest.CaptureFixture[str]) -> None:

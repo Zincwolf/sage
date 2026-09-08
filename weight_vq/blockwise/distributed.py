@@ -1,4 +1,4 @@
-"""Single-node data parallel primitives for QTIP."""
+"""Single-node data parallel primitives for blockwise quantization."""
 
 from __future__ import annotations
 

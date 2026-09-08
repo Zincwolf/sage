@@ -19,12 +19,12 @@ from transformers import (
     PreTrainedTokenizerFast,
 )
 
-from weight_vq.qtip.artifacts import PROJECTIONS, atomic_write_completion
+from weight_vq.blockwise.artifacts import PROJECTIONS, atomic_write_completion
+from weight_vq.blockwise.hessian import LayerHessianCollectors
+from weight_vq.blockwise.models import language_backbone
+from weight_vq.blockwise.pipeline import _model_contract, export, hessian, quantize, validate
+from weight_vq.blockwise.replay import capture_replay
 from weight_vq.qtip.config import QTIPConfig
-from weight_vq.qtip.hessian import LayerHessianCollectors
-from weight_vq.qtip.models import language_backbone
-from weight_vq.qtip.pipeline import _model_contract, export, hessian, quantize, validate
-from weight_vq.qtip.replay import capture_replay
 
 
 @pytest.fixture(params=[128, 256], ids=["square", "rectangular"])
@@ -147,7 +147,8 @@ def test_export_preserves_multimodal_shell(ministral, monkeypatch, capsys):
         json.dumps(config.recipe(model_family="mistral3", layer_end=2))
     )
     monkeypatch.setattr(
-        "weight_vq.qtip.pipeline.reconstruct_dense_weight", lambda saved, recipe: saved["weight"]
+        "weight_vq.blockwise.pipeline.reconstruct_dense_weight",
+        lambda saved, recipe: saved["weight"],
     )
     export(config)
     restored = AutoModelForImageTextToText.from_pretrained(config.exported_model).eval()

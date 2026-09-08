@@ -9,8 +9,8 @@ import torch
 from torch import nn
 from transformers.masking_utils import create_causal_mask, create_sliding_window_causal_mask
 
-from weight_vq.qtip.hessian import LayerHessianCollectors
-from weight_vq.qtip.models import language_backbone
+from weight_vq.blockwise.hessian import LayerHessianCollectors
+from weight_vq.blockwise.models import language_backbone
 
 
 @dataclass

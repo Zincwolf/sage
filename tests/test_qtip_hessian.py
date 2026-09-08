@@ -2,7 +2,11 @@ import pytest
 import torch
 from torch import nn
 
-from weight_vq.qtip.hessian import LayerHessianCollectors, MaskedHessianCollector, collector_modules
+from weight_vq.blockwise.hessian import (
+    LayerHessianCollectors,
+    MaskedHessianCollector,
+    collector_modules,
+)
 
 
 class TinyAttention(nn.Module):

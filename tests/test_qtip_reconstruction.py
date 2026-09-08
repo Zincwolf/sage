@@ -5,10 +5,10 @@ import torch.distributed as dist
 from torch.multiprocessing.spawn import spawn
 from transformers import Qwen3Config, Qwen3ForCausalLM
 
+from weight_vq.blockwise.distributed import DistributedContext
+from weight_vq.blockwise.reconstruction import DistributedReconstruction
+from weight_vq.blockwise.replay import capture_replay
 from weight_vq.qtip.config import QTIPConfig
-from weight_vq.qtip.distributed import DistributedContext
-from weight_vq.qtip.reconstruction import DistributedReconstruction
-from weight_vq.qtip.replay import capture_replay
 
 
 def _worker(rank, world_size, path):

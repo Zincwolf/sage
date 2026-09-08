@@ -9,7 +9,7 @@ from datasets import Dataset, DatasetInfo, concatenate_datasets
 from transformers import AutoTokenizer
 
 from weight_vq import utils
-from weight_vq.qtip.config import QTIPConfig
+from weight_vq.blockwise.config import BlockwiseConfig
 
 
 def sample_documents(
@@ -42,7 +42,7 @@ def sample_documents(
     return result.reshape(samples, length)
 
 
-def calibration(config: QTIPConfig) -> None:
+def calibration(config: BlockwiseConfig) -> None:
     protocol = config.calibration_recipe()
     if config.calibration.exists():
         load_calibration(config)
@@ -91,7 +91,7 @@ def calibration(config: QTIPConfig) -> None:
     )
 
 
-def load_calibration(config: QTIPConfig) -> dict[str, Any]:
+def load_calibration(config: BlockwiseConfig) -> dict[str, Any]:
     artifact = torch.load(config.calibration, map_location="cpu", weights_only=True, mmap=True)
     if artifact["protocol"] != config.calibration_recipe():
         raise RuntimeError("calibration protocol differs; use a new output_dir")

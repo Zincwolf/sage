@@ -106,9 +106,11 @@ def test_training_cache_with_implicit_factor(
     layer.get_buffer("SU").requires_grad_(True)
     layer.get_buffer("SV").requires_grad_(True)
     actual = layer(x)
-    # Upstream train_mode caches FP16 weights and performs an FP16 matmul.
-    expected = (x.half() @ (dense.T / 32).half()).float() * 32
-    torch.testing.assert_close(actual, expected, rtol=3e-3, atol=3e-2)
+    cached = layer.codebook_class.W
+    torch.testing.assert_close(cached.float(), dense.T / 32, rtol=1e-3, atol=1e-4)
+    # Isolate FP16 GEMM from reference/CUDA transform rounding near FP16 midpoints.
+    expected = (x.half() @ cached).float() * 32
+    torch.testing.assert_close(actual, expected, rtol=0, atol=0)
     actual.square().mean().backward()
     for tensor in (x, layer.get_buffer("SU"), layer.get_buffer("SV")):
         assert tensor.grad is not None

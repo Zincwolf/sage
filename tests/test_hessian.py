@@ -9,15 +9,18 @@ import torch.distributed as dist
 from torch import nn
 from torch.multiprocessing.spawn import spawn
 
+from weight_vq.blockwise.distributed import DistributedContext
 from weight_vq.hessian import LinearHessianCollectors, MaskedHessianCollector
-from weight_vq.qtip.distributed import DistributedContext
 
 
+@pytest.mark.parametrize("dtype", [torch.float32, torch.float64])
 @pytest.mark.parametrize("center", [False, True])
 @pytest.mark.parametrize("include_padding", [False, True])
-def test_moments_across_microbatches(center: bool, include_padding: bool) -> None:
+def test_moments_across_microbatches(
+    center: bool, include_padding: bool, dtype: torch.dtype
+) -> None:
     linear = nn.Linear(2, 2, bias=False)
-    collector = MaskedHessianCollector(linear, include_padding=include_padding)
+    collector = MaskedHessianCollector(linear, include_padding=include_padding, dtype=dtype)
     values = torch.tensor([[[1.0, 3.0], [9.0, 7.0]], [[-1.0, 5.0], [3.0, 1.0]]])
     mask = torch.tensor([[True, False], [True, True]])
     for batch, positions in zip(values.split(1), mask.split(1), strict=True):
@@ -25,7 +28,7 @@ def test_moments_across_microbatches(center: bool, include_padding: bool) -> Non
         linear(batch)
     result = collector.close(center=center)
 
-    selected = values.reshape(-1, 2) if include_padding else values[mask]
+    selected = (values.reshape(-1, 2) if include_padding else values[mask]).to(dtype)
     mean = selected.mean(0)
     deviations = selected - mean if center else selected
     expected = deviations.T @ deviations / len(selected)

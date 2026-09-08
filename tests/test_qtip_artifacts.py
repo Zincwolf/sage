@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from weight_vq.qtip.artifacts import (
+from weight_vq.blockwise.artifacts import (
     PROJECTIONS,
     atomic_write_completion,
     layer_complete,

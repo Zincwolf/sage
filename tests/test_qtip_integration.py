@@ -16,13 +16,14 @@ from transformers import (
     Qwen3ForCausalLM,
 )
 
-from weight_vq.qtip.artifacts import PROJECTIONS, quant_order, reconstruct_dense_weight
+from weight_vq.blockwise.artifacts import PROJECTIONS, quant_order
+from weight_vq.blockwise.distributed import DistributedContext
+from weight_vq.blockwise.hessian import LayerHessianCollectors
+from weight_vq.blockwise.pipeline import export, hessian, quantize
+from weight_vq.blockwise.reconstruction import DistributedReconstruction
+from weight_vq.blockwise.replay import capture_replay
+from weight_vq.qtip.artifacts import reconstruct_dense_weight
 from weight_vq.qtip.config import QTIPConfig
-from weight_vq.qtip.distributed import DistributedContext
-from weight_vq.qtip.hessian import LayerHessianCollectors
-from weight_vq.qtip.pipeline import export, hessian, quantize
-from weight_vq.qtip.reconstruction import DistributedReconstruction
-from weight_vq.qtip.replay import capture_replay
 
 
 @pytest.fixture

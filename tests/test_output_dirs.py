@@ -4,8 +4,8 @@ from pathlib import Path
 import pytest
 
 from weight_vq import cli
+from weight_vq.blockwise.pipeline import _initialize_run
 from weight_vq.qtip.config import QTIPConfig
-from weight_vq.qtip.pipeline import _initialize_run
 from weight_vq.sphquant.config import SPHQuantConfig
 
 
@@ -88,7 +88,7 @@ def test_qtip_initializes_nested_output_and_keeps_recipe_relocatable(
 ) -> None:
     root = tmp_path / "nested" / "run"
     config = QTIPConfig(model=tmp_path, dataset=tmp_path, output_dir=root, devices=[0])
-    monkeypatch.setattr("weight_vq.qtip.pipeline.bitshift_codebook", lambda **_kwargs: None)
+    monkeypatch.setattr("weight_vq.blockwise.pipeline.bitshift_codebook", lambda **_kwargs: None)
     _initialize_run(config, "qwen3", 2)
     assert not config.hessians.exists()
     assert config.checkpoints.is_dir()

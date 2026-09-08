@@ -11,13 +11,17 @@ from torch import nn
 class MaskedHessianCollector:
     """Accumulate an uncentered second moment for one linear projection."""
 
-    def __init__(self, module: nn.Linear, *, include_padding: bool = False) -> None:
+    def __init__(
+        self,
+        module: nn.Linear,
+        *,
+        include_padding: bool = False,
+        dtype: torch.dtype = torch.float32,
+    ) -> None:
         self.size = module.in_features
         self.include_padding = include_padding
-        self.matrix = torch.zeros(
-            self.size, self.size, dtype=torch.float32, device=module.weight.device
-        )
-        self.first_moment = torch.zeros(self.size, dtype=torch.float32, device=module.weight.device)
+        self.matrix = torch.zeros(self.size, self.size, dtype=dtype, device=module.weight.device)
+        self.first_moment = torch.zeros(self.size, dtype=dtype, device=module.weight.device)
         self.count = 0
         self._position_mask: torch.Tensor | None = None
         self._handle = module.register_forward_pre_hook(self._hook)
@@ -32,7 +36,7 @@ class MaskedHessianCollector:
         values = inputs[0]
         if values.shape[-1] != self.size:
             raise RuntimeError(f"Projection input width {values.shape[-1]} != {self.size}")
-        flattened = values.reshape(-1, self.size).float()
+        flattened = values.reshape(-1, self.size).to(self.matrix.dtype)
         if not self.include_padding:
             if self._position_mask is None:
                 raise RuntimeError("Position mask must be set before every layer forward")
@@ -93,9 +97,15 @@ class MaskedHessianCollector:
 class LinearHessianCollectors:
     """Collect Hessians for a caller-provided mapping of linear projections."""
 
-    def __init__(self, modules: dict[str, nn.Linear], *, include_padding: bool = False) -> None:
+    def __init__(
+        self,
+        modules: dict[str, nn.Linear],
+        *,
+        include_padding: bool = False,
+        dtype: torch.dtype = torch.float32,
+    ) -> None:
         self.collectors = {
-            name: MaskedHessianCollector(module, include_padding=include_padding)
+            name: MaskedHessianCollector(module, include_padding=include_padding, dtype=dtype)
             for name, module in modules.items()
         }
 

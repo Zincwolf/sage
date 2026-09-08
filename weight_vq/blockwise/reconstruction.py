@@ -9,16 +9,16 @@ import torch
 from torch import nn
 
 from weight_vq import utils
-from weight_vq.qtip.config import QTIPConfig
-from weight_vq.qtip.distributed import DistributedContext
-from weight_vq.qtip.replay import LayerReplay
+from weight_vq.blockwise.config import BlockwiseConfig
+from weight_vq.blockwise.distributed import DistributedContext
+from weight_vq.blockwise.replay import LayerReplay
 
 
 @dataclass
 class DistributedReconstruction:
     train: LayerReplay
     validation: LayerReplay
-    config: QTIPConfig
+    config: BlockwiseConfig
     distributed: DistributedContext
     seed: int
 
@@ -36,7 +36,7 @@ class DistributedReconstruction:
     def __call__(self, layer: nn.Module, name: str, orig_dtype: torch.dtype) -> None:
         device = self.distributed.device
         layer.to(device).eval()
-        # Materialize upstream lazy trellis/LUT modules before snapshot or optimizer.
+        # Materialize upstream lazy quantized modules before snapshot or optimizer.
         with (
             torch.no_grad(),
             torch.autocast(
@@ -51,7 +51,7 @@ class DistributedReconstruction:
                 (susv if parameter_name.rsplit(".", 1)[-1] in ("SU", "SV") else ordinary).append(
                     parameter
                 )
-        # LUT uses the ordinary group: a migration choice, not a QuIP# prescription.
+        # QTIP LUT parameters join the ordinary group; QuIP# has a fixed codebook.
         optimizer = torch.optim.Adam(
             [
                 {"params": ordinary, "lr": self.config.learning_rate},

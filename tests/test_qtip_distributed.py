@@ -5,8 +5,8 @@ import torch.distributed as dist
 from torch import nn
 from torch.multiprocessing.spawn import spawn
 
-from weight_vq.qtip.distributed import DistributedContext
-from weight_vq.qtip.hessian import MaskedHessianCollector
+from weight_vq.blockwise.distributed import DistributedContext
+from weight_vq.blockwise.hessian import MaskedHessianCollector
 
 
 def _collective_worker(rank: int, rendezvous: str, output: str) -> None:

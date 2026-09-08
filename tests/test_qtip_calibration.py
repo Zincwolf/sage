@@ -5,7 +5,7 @@ import pytest
 import torch
 from datasets import Dataset
 
-from weight_vq.qtip.calibration import calibration, load_calibration, sample_documents
+from weight_vq.blockwise.calibration import calibration, load_calibration, sample_documents
 from weight_vq.qtip.config import QTIPConfig
 
 
@@ -67,7 +67,7 @@ def test_calibration_artifact_protocol_and_stage_splits(tmp_path, monkeypatch):
     )
     tokenizer = Tokenizer()
     monkeypatch.setattr(
-        "weight_vq.qtip.calibration.AutoTokenizer.from_pretrained", lambda *a, **k: tokenizer
+        "weight_vq.blockwise.calibration.AutoTokenizer.from_pretrained", lambda *a, **k: tokenizer
     )
     calibration(config)
     payload = load_calibration(config)

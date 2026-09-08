@@ -10,10 +10,10 @@ from typing import Any
 from jsonargparse import ArgumentParser, Namespace
 
 from weight_vq import calibration, vlm_calibration
-from weight_vq.config import CalibrationConfig, PendingPipelineConfig, VLMCalibrationConfig
-from weight_vq.qtip import pipeline as qtip_pipeline
+from weight_vq.blockwise import pipeline as blockwise_pipeline
+from weight_vq.config import CalibrationConfig, VLMCalibrationConfig
 from weight_vq.qtip.config import QTIPConfig
-from weight_vq.quip_sharp import pipeline as quip_sharp_pipeline
+from weight_vq.quip_sharp.config import QuIPSharpConfig
 from weight_vq.sphquant import pipeline as sphquant_pipeline
 from weight_vq.sphquant.config import SPHQuantConfig
 
@@ -21,22 +21,19 @@ Stage = Callable[[Any], None]
 ConfigType = type[Any]
 
 STAGES: dict[tuple[str, str], tuple[Stage, ConfigType]] = {
-    ("data", "calibration"): (calibration.main, CalibrationConfig),
-    ("data", "vlm-calibration"): (vlm_calibration.main, VLMCalibrationConfig),
-    ("qtip", "calibration"): (qtip_pipeline.calibration, QTIPConfig),
-    ("qtip", "run"): (qtip_pipeline.run, QTIPConfig),
-    ("qtip", "hessian"): (qtip_pipeline.hessian, QTIPConfig),
-    ("qtip", "quantize"): (qtip_pipeline.quantize, QTIPConfig),
-    ("qtip", "export"): (qtip_pipeline.export, QTIPConfig),
-    ("qtip", "validate"): (qtip_pipeline.validate, QTIPConfig),
-    ("quip-sharp", "hessian"): (quip_sharp_pipeline.hessian, PendingPipelineConfig),
-    ("quip-sharp", "quantize"): (quip_sharp_pipeline.quantize, PendingPipelineConfig),
-    ("quip-sharp", "export"): (quip_sharp_pipeline.export, PendingPipelineConfig),
-    ("quip-sharp", "validate"): (quip_sharp_pipeline.validate, PendingPipelineConfig),
-    ("sphquant", "optimize"): (sphquant_pipeline.optimize, SPHQuantConfig),
-    ("sphquant", "export"): (sphquant_pipeline.export, SPHQuantConfig),
-    ("sphquant", "validate"): (sphquant_pipeline.validate, SPHQuantConfig),
+    (method, stage): (getattr(blockwise_pipeline, stage), config_type)
+    for method, config_type in (("qtip", QTIPConfig), ("quip-sharp", QuIPSharpConfig))
+    for stage in ("calibration", "hessian", "quantize", "export", "validate", "run")
 }
+STAGES.update(
+    {
+        ("data", "calibration"): (calibration.main, CalibrationConfig),
+        ("data", "vlm-calibration"): (vlm_calibration.main, VLMCalibrationConfig),
+        ("sphquant", "optimize"): (sphquant_pipeline.optimize, SPHQuantConfig),
+        ("sphquant", "export"): (sphquant_pipeline.export, SPHQuantConfig),
+        ("sphquant", "validate"): (sphquant_pipeline.validate, SPHQuantConfig),
+    }
+)
 
 
 def parser() -> ArgumentParser:

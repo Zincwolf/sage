@@ -1,4 +1,4 @@
-"""QTIP language-model calibration through HF dense QDQ export."""
+"""Shared language-model calibration through HF dense QDQ export."""
 
 from __future__ import annotations
 
@@ -24,22 +24,26 @@ from transformers import (
 )
 
 from weight_vq import utils
-from weight_vq.qtip.artifacts import (
+from weight_vq.blockwise.artifacts import (
     PROJECTIONS,
     atomic_write_completion,
     hessian_complete,
     layer_complete,
     quant_order,
-    reconstruct_dense_weight,
 )
-from weight_vq.qtip.calibration import calibration, load_calibration
+from weight_vq.blockwise.calibration import calibration, load_calibration
+from weight_vq.blockwise.distributed import process_group
+from weight_vq.blockwise.hessian import LayerHessianCollectors
+from weight_vq.blockwise.models import language_backbone
+from weight_vq.blockwise.reconstruction import DistributedReconstruction
+from weight_vq.blockwise.replay import capture_replay
+from weight_vq.qtip.artifacts import reconstruct_dense_weight
 from weight_vq.qtip.config import QTIPConfig
-from weight_vq.qtip.distributed import process_group
-from weight_vq.qtip.hessian import LayerHessianCollectors
-from weight_vq.qtip.models import language_backbone
-from weight_vq.qtip.reconstruction import DistributedReconstruction
-from weight_vq.qtip.replay import capture_replay
+from weight_vq.quip_sharp.config import QuIPSharpConfig
+from weight_vq.quip_sharp.quantization import quantize_layer
+from weight_vq.quip_sharp.quantization import reconstruct_dense_weight as reconstruct_quip_weight
 
+Config = QTIPConfig | QuIPSharpConfig
 Stage = Literal["hessian", "quantize"]
 
 
@@ -49,14 +53,16 @@ def _model_contract(model: Path) -> tuple[str, int]:
         return "qwen3", int(config.num_hidden_layers)
     if config.model_type == "mistral3" and config.text_config.model_type == "ministral3":
         return "mistral3", int(config.text_config.num_hidden_layers)
-    raise ValueError(f"QTIP currently supports qwen3 and Ministral-3, got {config.model_type!r}")
+    raise ValueError(
+        f"Blockwise pipeline supports qwen3 and Ministral-3, got {config.model_type!r}"
+    )
 
 
 def model_loader(family: str):
     return AutoModelForImageTextToText if family == "mistral3" else AutoModelForCausalLM
 
 
-def layer_range(config: QTIPConfig, model_layers: int) -> tuple[int, int]:
+def layer_range(config: Config, model_layers: int) -> tuple[int, int]:
     return config.layer_start, model_layers if config.layer_end is None else config.layer_end
 
 
@@ -64,16 +70,17 @@ def _tlut_path(config: QTIPConfig) -> Path:
     return config.checkpoints / f"tlut-l{config.L}-b{config.tlut_bits}-v{config.V}.pt"
 
 
-def _initialize_run(config: QTIPConfig, family: str, end: int) -> None:
+def _initialize_run(config: Config, family: str, end: int) -> None:
     config.checkpoints.mkdir(parents=True, exist_ok=True)
     recipe = config.recipe(model_family=family, layer_end=end)
-    recipe_path = config.checkpoints / "qtip_config.json"
+    method = "qtip" if isinstance(config, QTIPConfig) else "quip_sharp"
+    recipe_path = config.checkpoints / f"{method}_config.json"
     if recipe_path.exists():
         if json.loads(recipe_path.read_text()) != recipe:
             raise RuntimeError("configuration differs from checkpoints; use a new output_dir")
     else:
         utils.atomic_write_text(recipe_path, json.dumps(recipe, indent=2) + "\n")
-    if not _tlut_path(config).exists():
+    if isinstance(config, QTIPConfig) and not _tlut_path(config).exists():
         torch.manual_seed(config.seed)
         bitshift_codebook(
             L=config.L,
@@ -87,7 +94,7 @@ def _initialize_run(config: QTIPConfig, family: str, end: int) -> None:
 
 def _run_rank(
     rank: int,
-    config: QTIPConfig,
+    config: Config,
     stage: Stage,
     family: str,
     start: int,
@@ -116,7 +123,9 @@ def _run_rank(
         layers = language_backbone(model).layers
         data = load_calibration(config)
         if stage == "hessian":
-            accumulators: dict[tuple[int, str], tuple[torch.Tensor, int]] = {}
+            centered = isinstance(config, QuIPSharpConfig)
+            statistics_dtype = torch.float64 if centered else torch.float32
+            accumulators: dict[tuple[int, str], tuple[torch.Tensor, torch.Tensor, int]] = {}
             for chunk in data["hessian"].split(config.hessian_chunk_size):
                 state = capture_replay(
                     model,
@@ -128,7 +137,7 @@ def _run_rank(
                 for index in range(end):
                     layer = layers[index].to(distributed.device)
                     collectors = (
-                        LayerHessianCollectors(layer, include_padding=True)
+                        LayerHessianCollectors(layer, include_padding=True, dtype=statistics_dtype)
                         if index >= start
                         else None
                     )
@@ -139,27 +148,37 @@ def _run_rank(
                     layer.cpu()
                     if collectors is not None:
                         for name, collector in collectors.collectors.items():
-                            matrix, count = collector.close_raw(distributed)
+                            matrix, first_moment, count = collector.close_statistics(distributed)
                             if distributed.is_primary:
                                 key = (index, name)
                                 if key in accumulators:
-                                    total, tokens = accumulators[key]
+                                    total, first_total, tokens = accumulators[key]
                                     total.add_(matrix)
-                                    accumulators[key] = total, tokens + count
+                                    first_total.add_(first_moment)
+                                    accumulators[key] = total, first_total, tokens + count
                                 else:
-                                    accumulators[key] = matrix, count
-                            del matrix
+                                    accumulators[key] = matrix, first_moment, count
+                            del matrix, first_moment
                     del collectors, layer
                     utils.clear_cuda_cache()
                 del state
                 utils.clear_cuda_cache()
             if distributed.is_primary:
-                for (index, name), (matrix, count) in accumulators.items():
+                for (index, name), (matrix, first_moment, count) in accumulators.items():
                     matrix.div_(count)
+                    if centered:
+                        first_moment.div_(count)
+                        matrix.sub_(first_moment[:, None] * first_moment[None, :])
                     # Avoid two quadratic int64 index arrays for the packed triangle.
                     flat = torch.cat([row[: i + 1] for i, row in enumerate(matrix)])
                     utils.atomic_torch_save(
-                        {"flatH": flat, "n": matrix.shape[0], "ct": count, "position_mask": "all"},
+                        {
+                            "flatH": flat,
+                            "n": matrix.shape[0],
+                            "ct": count,
+                            "position_mask": "all",
+                            **({"mu": first_moment} if centered else {}),
+                        },
                         hessian_dir / f"{index}_{name}.pt",
                     )
                 utils.atomic_write_text(
@@ -169,14 +188,16 @@ def _run_rank(
             distributed.barrier()
             return
 
-        codebook = bitshift_codebook(
-            L=config.L,
-            K=config.K,
-            V=config.V,
-            tlut_bits=config.tlut_bits,
-            decode_mode=config.decode_mode,
-            tlut_path=_tlut_path(config),
-        )
+        codebook = None
+        if isinstance(config, QTIPConfig):
+            codebook = bitshift_codebook(
+                L=config.L,
+                K=config.K,
+                V=config.V,
+                tlut_bits=config.tlut_bits,
+                decode_mode=config.decode_mode,
+                tlut_path=_tlut_path(config),
+            )
         train = capture_replay(
             model,
             data["train"][rank :: distributed.world_size],
@@ -203,24 +224,27 @@ def _run_rank(
                 reconstruction = DistributedReconstruction(
                     train_layer, validation_layer, config, distributed, config.seed + index
                 )
-                finetune.quantize_finetune_decoder_layer(
-                    layer,
-                    quant_order(),
-                    index,
-                    codebook,
-                    config,
-                    distributed.device,
-                    None,
-                    None,
-                    reconstruction_callback=reconstruction,
-                    write_checkpoints=distributed.is_primary,
-                )
+                if isinstance(config, QTIPConfig):
+                    finetune.quantize_finetune_decoder_layer(
+                        layer,
+                        quant_order(),
+                        index,
+                        codebook,
+                        config,
+                        distributed.device,
+                        None,
+                        None,
+                        reconstruction_callback=reconstruction,
+                        write_checkpoints=distributed.is_primary,
+                    )
+                else:
+                    quantize_layer(layer, index, config, reconstruction)
                 if distributed.is_primary:
                     prefixes = tuple(f"{attribute}." for attribute, *_ in PROJECTIONS)
                     auxiliary = {
                         name: value.detach().cpu().clone()
                         for name, value in layer.state_dict().items()
-                        if not name.startswith(prefixes)
+                        if not name.startswith(prefixes) or name.endswith(".bias")
                     }
                     utils.atomic_torch_save(auxiliary, config.checkpoints / f"{index}.auxiliary.pt")
                     atomic_write_completion(index, config.checkpoints)
@@ -232,7 +256,7 @@ def _run_rank(
             utils.clear_cuda_cache()
 
 
-def _run_workers(config: QTIPConfig, stage: Stage) -> None:
+def _run_workers(config: Config, stage: Stage) -> None:
     family, model_layers = _model_contract(config.model)
     start, end = layer_range(config, model_layers)
     load_calibration(config)
@@ -268,28 +292,30 @@ def _run_workers(config: QTIPConfig, stage: Stage) -> None:
             index for index in range(start, end) if not layer_complete(index, config.checkpoints)
         ]
         if missing:
-            raise RuntimeError(f"QTIP quantize did not complete layers: {missing}")
+            raise RuntimeError(f"quantize did not complete layers: {missing}")
 
 
-def hessian(config: QTIPConfig) -> None:
+def hessian(config: Config) -> None:
     _run_workers(config, "hessian")
 
 
-def quantize(config: QTIPConfig) -> None:
+def quantize(config: Config) -> None:
     _run_workers(config, "quantize")
 
 
-def export(config: QTIPConfig) -> None:
+def export(config: Config) -> None:
     family, model_layers = _model_contract(config.model)
     start, end = layer_range(config, model_layers)
-    recipe = json.loads((config.checkpoints / "qtip_config.json").read_text())
+    method = "qtip" if isinstance(config, QTIPConfig) else "quip_sharp"
+    recipe_name = f"{method}_config.json"
+    recipe = json.loads((config.checkpoints / recipe_name).read_text())
     if recipe != config.recipe(model_family=family, layer_end=end):
         raise RuntimeError("export configuration differs from checkpoint recipe")
     missing = [
         index for index in range(start, end) if not layer_complete(index, config.checkpoints)
     ]
     if missing:
-        raise RuntimeError(f"QTIP checkpoints are incomplete for layers: {missing}")
+        raise RuntimeError(f"checkpoints are incomplete for layers: {missing}")
     if config.exported_model.exists():
         raise FileExistsError(f"refusing to overwrite {config.exported_model}")
     model = (
@@ -308,7 +334,13 @@ def export(config: QTIPConfig) -> None:
                     weights_only=True,
                 )
                 linear = attrgetter(attribute)(layer)
-                linear.weight.copy_(reconstruct_dense_weight(saved, recipe).to(linear.weight.dtype))
+                weight = (
+                    reconstruct_dense_weight(saved, recipe)
+                    if isinstance(config, QTIPConfig)
+                    else reconstruct_quip_weight(saved, torch.device(f"cuda:{config.devices[0]}"))
+                )
+                linear.weight.copy_(weight.to(linear.weight.dtype))
+                del weight
             auxiliary = torch.load(
                 config.checkpoints / f"{index}.auxiliary.pt", map_location="cpu", weights_only=True
             )
@@ -326,11 +358,11 @@ def export(config: QTIPConfig) -> None:
             AutoTokenizer.from_pretrained(config.model, local_files_only=True).save_pretrained(
                 staging
             )
-        shutil.copy2(config.checkpoints / "qtip_config.json", staging / "qtip_config.json")
+        shutil.copy2(config.checkpoints / recipe_name, staging / recipe_name)
         os.replace(staging, config.exported_model)
 
 
-def validate(config: QTIPConfig) -> None:
+def validate(config: Config) -> None:
     family, model_layers = _model_contract(config.model)
     start, end = layer_range(config, model_layers)
     prefix = "model.language_model" if family == "mistral3" else "model"
@@ -346,7 +378,7 @@ def validate(config: QTIPConfig) -> None:
     )
 
 
-def run(config: QTIPConfig) -> None:
+def run(config: Config) -> None:
     calibration(config)
     hessian(config)
     quantize(config)

@@ -7,9 +7,9 @@ import pytest
 import torch
 from transformers import Qwen3Config, Qwen3ForCausalLM
 
-from weight_vq.qtip.artifacts import PROJECTIONS, atomic_write_completion, layer_complete
+from weight_vq.blockwise.artifacts import PROJECTIONS, atomic_write_completion, layer_complete
+from weight_vq.blockwise.pipeline import _initialize_run, _model_contract, export, validate
 from weight_vq.qtip.config import QTIPConfig
-from weight_vq.qtip.pipeline import _initialize_run, _model_contract, export, validate
 
 
 def config(tmp_path):
@@ -25,7 +25,7 @@ def test_initialize_run_uses_run_local_tlut(monkeypatch, tmp_path):
     received = []
     cfg = config(tmp_path)
     monkeypatch.setattr(
-        "weight_vq.qtip.pipeline.bitshift_codebook", lambda **kwargs: received.append(kwargs)
+        "weight_vq.blockwise.pipeline.bitshift_codebook", lambda **kwargs: received.append(kwargs)
     )
     _initialize_run(cfg, "qwen3", 2)
     assert received[0]["tlut_path"] == cfg.checkpoints / "tlut-l16-b9-v2.pt"
@@ -33,10 +33,10 @@ def test_initialize_run_uses_run_local_tlut(monkeypatch, tmp_path):
 
 def test_model_contract_rejects_retired_qtip_vl(monkeypatch):
     monkeypatch.setattr(
-        "weight_vq.qtip.pipeline.AutoConfig.from_pretrained",
+        "weight_vq.blockwise.pipeline.AutoConfig.from_pretrained",
         lambda *a, **k: SimpleNamespace(model_type="qwen3_vl"),
     )
-    with pytest.raises(ValueError, match="currently supports qwen3"):
+    with pytest.raises(ValueError, match="supports qwen3"):
         _model_contract(Path("/vl"))
 
 
@@ -94,11 +94,12 @@ def test_export_loads_auxiliary_norms_and_preserves_untouched_modules(
         json.dumps(cfg.recipe(model_family="qwen3", layer_end=1))
     )
     monkeypatch.setattr(
-        "weight_vq.qtip.pipeline.reconstruct_dense_weight", lambda saved, recipe: saved["weight"]
+        "weight_vq.blockwise.pipeline.reconstruct_dense_weight",
+        lambda saved, recipe: saved["weight"],
     )
     assets = SimpleNamespace(save_pretrained=lambda path: (path / "tokenizer.json").touch())
     monkeypatch.setattr(
-        "weight_vq.qtip.pipeline.AutoTokenizer.from_pretrained", lambda *a, **k: assets
+        "weight_vq.blockwise.pipeline.AutoTokenizer.from_pretrained", lambda *a, **k: assets
     )
     export(cfg)
     restored = Qwen3ForCausalLM.from_pretrained(cfg.exported_model).eval()
@@ -108,7 +109,8 @@ def test_export_loads_auxiliary_norms_and_preserves_untouched_modules(
     for name, value in auxiliary.items():
         torch.testing.assert_close(restored.model.layers[0].get_parameter(name), value)
     monkeypatch.setattr(
-        "weight_vq.qtip.pipeline.AutoModelForCausalLM.from_pretrained", lambda *a, **k: restored
+        "weight_vq.blockwise.pipeline.AutoModelForCausalLM.from_pretrained",
+        lambda *a, **k: restored,
     )
     validate(cfg)
     rows = list(csv.reader(capsys.readouterr().out.splitlines()))
