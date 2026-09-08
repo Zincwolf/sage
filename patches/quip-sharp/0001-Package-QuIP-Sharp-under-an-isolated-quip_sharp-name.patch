@@ -1,0 +1,496 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Zincwolf <zincwolf@outlook.com>
+Date: Tue, 8 Sep 2026 13:54:46 +0800
+Subject: [PATCH] Package QuIP-Sharp under an isolated quip_sharp namespace
+
+---
+ .gitignore                                           |  3 +++
+ eval/eval_ppl.py                                     |  4 ++--
+ eval/eval_speed.py                                   |  2 +-
+ eval/eval_zeroshot.py                                |  4 ++--
+ eval/interactive_gen.py                              |  2 +-
+ model/llama.py                                       |  4 ++--
+ model/mistral.py                                     |  6 +++---
+ pyproject.toml                                       | 12 ++++++++++++
+ quantize_llama/finetune_e2e_llama.py                 |  6 +++---
+ quantize_llama/hessian_offline_llama.py              |  2 +-
+ quantize_llama/hfize_llama.py                        |  6 +++---
+ quantize_llama/quantize_finetune_llama.py            |  6 +++---
+ {lib => quip_sharp}/__init__.py                      |  0
+ {lib => quip_sharp}/algo/__init__.py                 |  0
+ {lib => quip_sharp}/algo/finetune.py                 |  4 ++--
+ {lib => quip_sharp}/algo/quip.py                     |  2 +-
+ {lib => quip_sharp}/codebook/__init__.py             |  0
+ {lib => quip_sharp}/codebook/latticee8_padded12.py   |  2 +-
+ .../codebook/latticee8_padded12_rvq3bit.py           |  2 +-
+ .../codebook/latticee8_padded12_rvq4bit.py           |  2 +-
+ {lib => quip_sharp}/linear/__init__.py               |  0
+ {lib => quip_sharp}/linear/fused_linear.py           |  0
+ {lib => quip_sharp}/linear/fused_quantized_linear.py |  4 ++--
+ {lib => quip_sharp}/linear/quantized_linear.py       |  4 ++--
+ {lib => quip_sharp}/utils/__init__.py                |  0
+ {lib => quip_sharp}/utils/data_utils.py              |  2 +-
+ {lib => quip_sharp}/utils/finetune.py                |  0
+ {lib => quip_sharp}/utils/gptq_data_utils.py         |  0
+ {lib => quip_sharp}/utils/graph_wrapper.py           |  0
+ {lib => quip_sharp}/utils/lm_eval_adaptor.py         |  0
+ {lib => quip_sharp}/utils/math_utils.py              |  0
+ {lib => quip_sharp}/utils/matmul_had.py              |  2 +-
+ {lib => quip_sharp}/utils/matmul_kron.py             |  0
+ {lib => quip_sharp}/utils/misc.py                    |  2 +-
+ {lib => quip_sharp}/utils/model_version.py           |  0
+ {lib => quip_sharp}/utils/shard_model.py             |  4 ++--
+ {lib => quip_sharp}/utils/unsafe_import.py           |  0
+ 37 files changed, 51 insertions(+), 36 deletions(-)
+ create mode 100644 pyproject.toml
+ rename {lib => quip_sharp}/__init__.py (100%)
+ rename {lib => quip_sharp}/algo/__init__.py (100%)
+ rename {lib => quip_sharp}/algo/finetune.py (99%)
+ rename {lib => quip_sharp}/algo/quip.py (99%)
+ rename {lib => quip_sharp}/codebook/__init__.py (100%)
+ rename {lib => quip_sharp}/codebook/latticee8_padded12.py (99%)
+ rename {lib => quip_sharp}/codebook/latticee8_padded12_rvq3bit.py (99%)
+ rename {lib => quip_sharp}/codebook/latticee8_padded12_rvq4bit.py (99%)
+ rename {lib => quip_sharp}/linear/__init__.py (100%)
+ rename {lib => quip_sharp}/linear/fused_linear.py (100%)
+ rename {lib => quip_sharp}/linear/fused_quantized_linear.py (90%)
+ rename {lib => quip_sharp}/linear/quantized_linear.py (98%)
+ rename {lib => quip_sharp}/utils/__init__.py (100%)
+ rename {lib => quip_sharp}/utils/data_utils.py (99%)
+ rename {lib => quip_sharp}/utils/finetune.py (100%)
+ rename {lib => quip_sharp}/utils/gptq_data_utils.py (100%)
+ rename {lib => quip_sharp}/utils/graph_wrapper.py (100%)
+ rename {lib => quip_sharp}/utils/lm_eval_adaptor.py (100%)
+ rename {lib => quip_sharp}/utils/math_utils.py (100%)
+ rename {lib => quip_sharp}/utils/matmul_had.py (99%)
+ rename {lib => quip_sharp}/utils/matmul_kron.py (100%)
+ rename {lib => quip_sharp}/utils/misc.py (99%)
+ rename {lib => quip_sharp}/utils/model_version.py (100%)
+ rename {lib => quip_sharp}/utils/shard_model.py (95%)
+ rename {lib => quip_sharp}/utils/unsafe_import.py (100%)
+
+diff --git a/.gitignore b/.gitignore
+index 965d70a..5678eac 100644
+--- a/.gitignore
++++ b/.gitignore
+@@ -5,6 +5,9 @@
+ *.out
+ *.json
+ __pycache__/
++*.egg-info/
++/build/
++/dist/
+ #*
+ slurm_out/
+ hfized/
+diff --git a/eval/eval_ppl.py b/eval/eval_ppl.py
+index 71687c9..b6a6e3c 100644
+--- a/eval/eval_ppl.py
++++ b/eval/eval_ppl.py
+@@ -9,8 +9,8 @@ import glog
+ import torch
+ from tqdm import tqdm
+ 
+-from lib.utils import gptq_data_utils
+-from lib.utils.unsafe_import import model_from_hf_path
++from quip_sharp.utils import gptq_data_utils
++from quip_sharp.utils.unsafe_import import model_from_hf_path
+ 
+ torch.set_grad_enabled(False)
+ 
+diff --git a/eval/eval_speed.py b/eval/eval_speed.py
+index c61346b..74eae6f 100644
+--- a/eval/eval_speed.py
++++ b/eval/eval_speed.py
+@@ -7,7 +7,7 @@ import torch
+ from torch.profiler import ProfilerActivity, profile, record_function
+ from transformers import AutoTokenizer
+ 
+-from lib.utils.unsafe_import import model_from_hf_path
++from quip_sharp.utils.unsafe_import import model_from_hf_path
+ 
+ torch.set_grad_enabled(False)
+ 
+diff --git a/eval/eval_zeroshot.py b/eval/eval_zeroshot.py
+index de8cbcb..fa5a280 100644
+--- a/eval/eval_zeroshot.py
++++ b/eval/eval_zeroshot.py
+@@ -9,8 +9,8 @@ import torch
+ from lm_eval import evaluator, tasks
+ from transformers import AutoTokenizer
+ 
+-from lib.utils import LMEvalAdaptor
+-from lib.utils.unsafe_import import model_from_hf_path
++from quip_sharp.utils import LMEvalAdaptor
++from quip_sharp.utils.unsafe_import import model_from_hf_path
+ 
+ parser = argparse.ArgumentParser()
+ parser.add_argument('--seed', default=0, type=int)
+diff --git a/eval/interactive_gen.py b/eval/interactive_gen.py
+index a571045..76cc749 100644
+--- a/eval/interactive_gen.py
++++ b/eval/interactive_gen.py
+@@ -6,7 +6,7 @@ from typing import Optional
+ import torch
+ from transformers import AutoTokenizer, StaticCache
+ 
+-from lib.utils.unsafe_import import model_from_hf_path
++from quip_sharp.utils.unsafe_import import model_from_hf_path
+ torch.set_grad_enabled(False)
+ torch.set_float32_matmul_precision('high')
+ torch.backends.cuda.matmul.allow_tf32 = True
+diff --git a/model/llama.py b/model/llama.py
+index 4007a8f..76f05f8 100644
+--- a/model/llama.py
++++ b/model/llama.py
+@@ -56,8 +56,8 @@ if is_flash_attn_2_available():
+     from flash_attn.bert_padding import index_first_axis, pad_input, unpad_input  # noqa
+ 
+ 
+-from lib.linear.fused_quantized_linear import FusedQuantizedLinear
+-from lib.linear.quantized_linear import QuantizedLinear
++from quip_sharp.linear.fused_quantized_linear import FusedQuantizedLinear
++from quip_sharp.linear.quantized_linear import QuantizedLinear
+ 
+     
+ logger = logging.get_logger(__name__)
+diff --git a/model/mistral.py b/model/mistral.py
+index b478b1b..5590a04 100644
+--- a/model/mistral.py
++++ b/model/mistral.py
+@@ -52,9 +52,9 @@ if is_flash_attn_2_available():
+     _flash_supports_window_size = "window_size" in list(
+         inspect.signature(flash_attn_func).parameters)
+ 
+-from lib.linear.fused_quantized_linear import FusedQuantizedLinear
+-from lib.linear.quantized_linear import QuantizedLinear
+-from lib.utils import check_model_version
++from quip_sharp.linear.fused_quantized_linear import FusedQuantizedLinear
++from quip_sharp.linear.quantized_linear import QuantizedLinear
++from quip_sharp.utils import check_model_version
+ 
+ logger = logging.get_logger(__name__)
+ 
+diff --git a/pyproject.toml b/pyproject.toml
+new file mode 100644
+index 0000000..ad1b880
+--- /dev/null
++++ b/pyproject.toml
+@@ -0,0 +1,12 @@
++[project]
++name = "quip-sharp"
++version = "0.0.0"
++requires-python = ">=3.11"
++
++[build-system]
++requires = ["setuptools>=69.5.1"]
++build-backend = "setuptools.build_meta"
++
++[tool.setuptools.packages.find]
++include = ["quip_sharp", "quip_sharp.*"]
++namespaces = false
+diff --git a/quantize_llama/finetune_e2e_llama.py b/quantize_llama/finetune_e2e_llama.py
+index bb7573c..80dd52d 100644
+--- a/quantize_llama/finetune_e2e_llama.py
++++ b/quantize_llama/finetune_e2e_llama.py
+@@ -19,9 +19,9 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
+ from transformers.modeling_attn_mask_utils import \
+     _prepare_4d_causal_attention_mask
+ 
+-from lib import codebook, utils
+-from lib.algo import finetune, quip
+-from lib.utils.unsafe_import import model_from_hf_path
++from quip_sharp import codebook, utils
++from quip_sharp.algo import finetune, quip
++from quip_sharp.utils.unsafe_import import model_from_hf_path
+ 
+ parser = argparse.ArgumentParser()
+ parser.add_argument('--seed', default=0, type=int)
+diff --git a/quantize_llama/hessian_offline_llama.py b/quantize_llama/hessian_offline_llama.py
+index 24cdf79..76790f8 100644
+--- a/quantize_llama/hessian_offline_llama.py
++++ b/quantize_llama/hessian_offline_llama.py
+@@ -16,7 +16,7 @@ from transformers import (AutoModelForCausalLM, AutoTokenizer,
+ from transformers.modeling_attn_mask_utils import \
+     _prepare_4d_causal_attention_mask
+ 
+-from lib import utils
++from quip_sharp import utils
+ 
+ parser = argparse.ArgumentParser()
+ parser.add_argument('--seed', default=0, type=int)
+diff --git a/quantize_llama/hfize_llama.py b/quantize_llama/hfize_llama.py
+index 3aa5e03..94b3501 100644
+--- a/quantize_llama/hfize_llama.py
++++ b/quantize_llama/hfize_llama.py
+@@ -6,10 +6,10 @@ import glog
+ import torch
+ from transformers import AutoTokenizer
+ 
+-from lib import codebook, utils
+-from lib.utils.unsafe_import import model_from_hf_path
++from quip_sharp import codebook, utils
++from quip_sharp.utils.unsafe_import import model_from_hf_path
+ from model.llama import LlamaForCausalLM
+-from lib.utils.model_version import MODEL_VERSION
++from quip_sharp.utils.model_version import MODEL_VERSION
+ 
+ torch.set_grad_enabled(False)
+ 
+diff --git a/quantize_llama/quantize_finetune_llama.py b/quantize_llama/quantize_finetune_llama.py
+index af33222..dc91747 100644
+--- a/quantize_llama/quantize_finetune_llama.py
++++ b/quantize_llama/quantize_finetune_llama.py
+@@ -12,9 +12,9 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
+ from transformers.modeling_attn_mask_utils import \
+     _prepare_4d_causal_attention_mask
+ 
+-from lib import codebook, utils
+-from lib.algo import finetune, quip
+-from lib.linear import FusedLinear
++from quip_sharp import codebook, utils
++from quip_sharp.algo import finetune, quip
++from quip_sharp.linear import FusedLinear
+ from model.llama import LlamaDecoderLayer
+ 
+ parser = argparse.ArgumentParser()
+diff --git a/lib/__init__.py b/quip_sharp/__init__.py
+similarity index 100%
+rename from lib/__init__.py
+rename to quip_sharp/__init__.py
+diff --git a/lib/algo/__init__.py b/quip_sharp/algo/__init__.py
+similarity index 100%
+rename from lib/algo/__init__.py
+rename to quip_sharp/algo/__init__.py
+diff --git a/lib/algo/finetune.py b/quip_sharp/algo/finetune.py
+similarity index 99%
+rename from lib/algo/finetune.py
+rename to quip_sharp/algo/finetune.py
+index 0d12d31..108a66b 100644
+--- a/lib/algo/finetune.py
++++ b/quip_sharp/algo/finetune.py
+@@ -8,8 +8,8 @@ import glog
+ import torch
+ from torch import nn
+ 
+-from lib import codebook, utils
+-from lib.linear import *
++from quip_sharp import codebook, utils
++from quip_sharp.linear import *
+ 
+ from . import quip
+ 
+diff --git a/lib/algo/quip.py b/quip_sharp/algo/quip.py
+similarity index 99%
+rename from lib/algo/quip.py
+rename to quip_sharp/algo/quip.py
+index 7ceb211..e877497 100644
+--- a/lib/algo/quip.py
++++ b/quip_sharp/algo/quip.py
+@@ -5,7 +5,7 @@ import glog
+ import torch
+ from tqdm import tqdm
+ 
+-from lib import utils
++from quip_sharp import utils
+ 
+ 
+ def RHT_H(H, SU):
+diff --git a/lib/codebook/__init__.py b/quip_sharp/codebook/__init__.py
+similarity index 100%
+rename from lib/codebook/__init__.py
+rename to quip_sharp/codebook/__init__.py
+diff --git a/lib/codebook/latticee8_padded12.py b/quip_sharp/codebook/latticee8_padded12.py
+similarity index 99%
+rename from lib/codebook/latticee8_padded12.py
+rename to quip_sharp/codebook/latticee8_padded12.py
+index 874be0f..def8aa0 100644
+--- a/lib/codebook/latticee8_padded12.py
++++ b/quip_sharp/codebook/latticee8_padded12.py
+@@ -16,7 +16,7 @@ import quiptools_cuda
+ import torch
+ from torch import nn
+ 
+-from lib.utils.matmul_had import matmul_hadU_cuda, matmul_hadUt_cuda
++from quip_sharp.utils.matmul_had import matmul_hadU_cuda, matmul_hadUt_cuda
+ 
+ _E8P_CODESZ = 8
+ 
+diff --git a/lib/codebook/latticee8_padded12_rvq3bit.py b/quip_sharp/codebook/latticee8_padded12_rvq3bit.py
+similarity index 99%
+rename from lib/codebook/latticee8_padded12_rvq3bit.py
+rename to quip_sharp/codebook/latticee8_padded12_rvq3bit.py
+index 62e31a3..95adb25 100644
+--- a/lib/codebook/latticee8_padded12_rvq3bit.py
++++ b/quip_sharp/codebook/latticee8_padded12_rvq3bit.py
+@@ -10,7 +10,7 @@ import quiptools_cuda
+ import torch
+ from torch import nn
+ 
+-from lib.utils.matmul_had import matmul_hadU_cuda, matmul_hadUt_cuda
++from quip_sharp.utils.matmul_had import matmul_hadU_cuda, matmul_hadUt_cuda
+ 
+ _E8P_CODESZ = 8
+ 
+diff --git a/lib/codebook/latticee8_padded12_rvq4bit.py b/quip_sharp/codebook/latticee8_padded12_rvq4bit.py
+similarity index 99%
+rename from lib/codebook/latticee8_padded12_rvq4bit.py
+rename to quip_sharp/codebook/latticee8_padded12_rvq4bit.py
+index 6c93db8..5645eef 100644
+--- a/lib/codebook/latticee8_padded12_rvq4bit.py
++++ b/quip_sharp/codebook/latticee8_padded12_rvq4bit.py
+@@ -10,7 +10,7 @@ import quiptools_cuda
+ import torch
+ from torch import nn
+ 
+-from lib.utils.matmul_had import matmul_hadU_cuda, matmul_hadUt_cuda
++from quip_sharp.utils.matmul_had import matmul_hadU_cuda, matmul_hadUt_cuda
+ 
+ _E8P_CODESZ = 8
+ 
+diff --git a/lib/linear/__init__.py b/quip_sharp/linear/__init__.py
+similarity index 100%
+rename from lib/linear/__init__.py
+rename to quip_sharp/linear/__init__.py
+diff --git a/lib/linear/fused_linear.py b/quip_sharp/linear/fused_linear.py
+similarity index 100%
+rename from lib/linear/fused_linear.py
+rename to quip_sharp/linear/fused_linear.py
+diff --git a/lib/linear/fused_quantized_linear.py b/quip_sharp/linear/fused_quantized_linear.py
+similarity index 90%
+rename from lib/linear/fused_quantized_linear.py
+rename to quip_sharp/linear/fused_quantized_linear.py
+index f767187..fb67e5c 100644
+--- a/lib/linear/fused_quantized_linear.py
++++ b/quip_sharp/linear/fused_quantized_linear.py
+@@ -4,8 +4,8 @@ import quiptools_cuda
+ import torch
+ import torch.nn as nn
+ 
+-from lib import codebook
+-from lib.utils import dtype_from_str, get_hadK
++from quip_sharp import codebook
++from quip_sharp.utils import dtype_from_str, get_hadK
+ 
+ from .quantized_linear import QuantizedLinear
+ 
+diff --git a/lib/linear/quantized_linear.py b/quip_sharp/linear/quantized_linear.py
+similarity index 98%
+rename from lib/linear/quantized_linear.py
+rename to quip_sharp/linear/quantized_linear.py
+index 9d0ba89..bdc26d0 100644
+--- a/lib/linear/quantized_linear.py
++++ b/quip_sharp/linear/quantized_linear.py
+@@ -4,8 +4,8 @@ import quiptools_cuda
+ import torch
+ import torch.nn as nn
+ 
+-from lib import codebook
+-from lib.utils import clean, dtype_from_str, get_hadK
++from quip_sharp import codebook
++from quip_sharp.utils import clean, dtype_from_str, get_hadK
+ 
+ 
+ class QuantizedLinear(nn.Module):
+diff --git a/lib/utils/__init__.py b/quip_sharp/utils/__init__.py
+similarity index 100%
+rename from lib/utils/__init__.py
+rename to quip_sharp/utils/__init__.py
+diff --git a/lib/utils/data_utils.py b/quip_sharp/utils/data_utils.py
+similarity index 99%
+rename from lib/utils/data_utils.py
+rename to quip_sharp/utils/data_utils.py
+index 02d1395..c8df3d8 100644
+--- a/lib/utils/data_utils.py
++++ b/quip_sharp/utils/data_utils.py
+@@ -5,7 +5,7 @@ import torch
+ from datasets import load_dataset
+ from torch.utils.data import DataLoader, Dataset
+ 
+-from lib import codebook
++from quip_sharp import codebook
+ 
+ from .matmul_had import matmul_hadU
+ 
+diff --git a/lib/utils/finetune.py b/quip_sharp/utils/finetune.py
+similarity index 100%
+rename from lib/utils/finetune.py
+rename to quip_sharp/utils/finetune.py
+diff --git a/lib/utils/gptq_data_utils.py b/quip_sharp/utils/gptq_data_utils.py
+similarity index 100%
+rename from lib/utils/gptq_data_utils.py
+rename to quip_sharp/utils/gptq_data_utils.py
+diff --git a/lib/utils/graph_wrapper.py b/quip_sharp/utils/graph_wrapper.py
+similarity index 100%
+rename from lib/utils/graph_wrapper.py
+rename to quip_sharp/utils/graph_wrapper.py
+diff --git a/lib/utils/lm_eval_adaptor.py b/quip_sharp/utils/lm_eval_adaptor.py
+similarity index 100%
+rename from lib/utils/lm_eval_adaptor.py
+rename to quip_sharp/utils/lm_eval_adaptor.py
+diff --git a/lib/utils/math_utils.py b/quip_sharp/utils/math_utils.py
+similarity index 100%
+rename from lib/utils/math_utils.py
+rename to quip_sharp/utils/math_utils.py
+diff --git a/lib/utils/matmul_had.py b/quip_sharp/utils/matmul_had.py
+similarity index 99%
+rename from lib/utils/matmul_had.py
+rename to quip_sharp/utils/matmul_had.py
+index 9915d0f..f32e7e0 100644
+--- a/lib/utils/matmul_had.py
++++ b/quip_sharp/utils/matmul_had.py
+@@ -1,7 +1,7 @@
+ import fast_hadamard_transform
+ import torch
+ 
+-from lib import utils
++from quip_sharp import utils
+ 
+ 
+ def get_hadK(n, transpose=False):
+diff --git a/lib/utils/matmul_kron.py b/quip_sharp/utils/matmul_kron.py
+similarity index 100%
+rename from lib/utils/matmul_kron.py
+rename to quip_sharp/utils/matmul_kron.py
+diff --git a/lib/utils/misc.py b/quip_sharp/utils/misc.py
+similarity index 99%
+rename from lib/utils/misc.py
+rename to quip_sharp/utils/misc.py
+index 12d7cd1..4e6ba2d 100644
+--- a/lib/utils/misc.py
++++ b/quip_sharp/utils/misc.py
+@@ -56,7 +56,7 @@ class ForkedPdb(pdb.Pdb):
+     """A Pdb subclass that may be used
+     from a forked multiprocessing child
+     use as:
+-    from lib import utils
++    from quip_sharp import utils
+     utils.ForkedPdb().set_trace()
+     """
+ 
+diff --git a/lib/utils/model_version.py b/quip_sharp/utils/model_version.py
+similarity index 100%
+rename from lib/utils/model_version.py
+rename to quip_sharp/utils/model_version.py
+diff --git a/lib/utils/shard_model.py b/quip_sharp/utils/shard_model.py
+similarity index 95%
+rename from lib/utils/shard_model.py
+rename to quip_sharp/utils/shard_model.py
+index ea7338e..f0724b7 100644
+--- a/lib/utils/shard_model.py
++++ b/quip_sharp/utils/shard_model.py
+@@ -54,8 +54,8 @@ class ShardTransformer(nn.Module):
+         self.shards = nn.ModuleList([_['shard'] for _ in shards])
+         self.devices = [_['device'] for _ in shards]
+ 
+-        from lib.linear.fused_quantized_linear import FusedQuantizedLinear
+-        from lib.linear.quantized_linear import QuantizedLinear
++        from quip_sharp.linear.fused_quantized_linear import FusedQuantizedLinear
++        from quip_sharp.linear.quantized_linear import QuantizedLinear
+         for name, module in self.shards.named_modules():
+             if isinstance(module, QuantizedLinear) or isinstance(
+                     module, FusedQuantizedLinear):
+diff --git a/lib/utils/unsafe_import.py b/quip_sharp/utils/unsafe_import.py
+similarity index 100%
+rename from lib/utils/unsafe_import.py
+rename to quip_sharp/utils/unsafe_import.py

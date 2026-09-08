@@ -1357,6 +1357,15 @@ wheels = [
 ]
 
 [[package]]
+name = "primefac"
+version = "2.0.12"
+source = { registry = "https://pypi.tuna.tsinghua.edu.cn/simple" }
+sdist = { url = "https://pypi.tuna.tsinghua.edu.cn/packages/a8/d7/1e763ff6030efb6f1f9f899d396c476b932eabf362bdff5b87fb949ad307/primefac-2.0.12.tar.gz", hash = "sha256:07616769a106a860bdff49d5d2d84a5267b26205a38529029f9f8bf916e5dc5f", size = 56149, upload-time = "2021-11-08T02:00:48.821Z" }
+wheels = [
+    { url = "https://pypi.tuna.tsinghua.edu.cn/packages/af/95/59166c0661bb902e7e3578ddac9ef3602e40556ada03219f616445598e2a/primefac-2.0.12-py3-none-any.whl", hash = "sha256:d864ea1f538d0e948a9244401fe248ed7b22818c2cae51f5f3b4d31a4cb34d21", size = 54843, upload-time = "2021-11-08T02:00:46.837Z" },
+]
+
+[[package]]
 name = "propcache"
 version = "0.5.2"
 source = { registry = "https://pypi.tuna.tsinghua.edu.cn/simple" }
@@ -1560,6 +1569,23 @@ wheels = [
 name = "qtip"
 version = "0.0.0"
 source = { editable = "third_party/qtip" }
+
+[[package]]
+name = "quip-sharp"
+version = "0.0.0"
+source = { editable = "third_party/quip-sharp" }
+
+[[package]]
+name = "quiptools-cuda"
+version = "0.0.0"
+source = { directory = "third_party/quip-sharp/quiptools" }
+dependencies = [
+    { name = "torch", version = "2.6.0+cu124", source = { registry = "https://download.pytorch.org/whl/cu124" }, marker = "extra == 'extra-9-weight-vq-cu124'" },
+    { name = "torch", version = "2.10.0+cu128", source = { registry = "https://download.pytorch.org/whl/cu128" }, marker = "extra == 'extra-9-weight-vq-cu128'" },
+]
+
+[package.metadata]
+requires-dist = [{ name = "torch" }]
 
 [[package]]
 name = "regex"
@@ -2128,7 +2154,9 @@ dependencies = [
     { name = "jsonargparse", extra = ["signatures"] },
     { name = "paroquant" },
     { name = "pillow" },
+    { name = "primefac" },
     { name = "qtip" },
+    { name = "quip-sharp" },
     { name = "safetensors" },
     { name = "scipy" },
     { name = "setuptools" },
@@ -2144,6 +2172,7 @@ cu124 = [
     { name = "fast-hadamard-transform" },
     { name = "huggingface-hub", version = "0.36.2", source = { registry = "https://pypi.tuna.tsinghua.edu.cn/simple" } },
     { name = "numpy", version = "2.1.2", source = { registry = "https://pypi.tuna.tsinghua.edu.cn/simple" } },
+    { name = "quiptools-cuda" },
     { name = "torch", version = "2.6.0+cu124", source = { registry = "https://download.pytorch.org/whl/cu124" } },
     { name = "torchvision", version = "0.21.0+cu124", source = { registry = "https://download.pytorch.org/whl/cu124" } },
     { name = "transformers", version = "4.57.6", source = { registry = "https://pypi.tuna.tsinghua.edu.cn/simple" } },
@@ -2155,6 +2184,7 @@ cu128 = [
     { name = "gptqmodel" },
     { name = "huggingface-hub", version = "1.30.0", source = { registry = "https://pypi.tuna.tsinghua.edu.cn/simple" } },
     { name = "numpy", version = "2.2.6", source = { registry = "https://pypi.tuna.tsinghua.edu.cn/simple" } },
+    { name = "quiptools-cuda" },
     { name = "torch", version = "2.10.0+cu128", source = { registry = "https://download.pytorch.org/whl/cu128" } },
     { name = "torchao" },
     { name = "torchvision", version = "0.25.0+cu128", source = { registry = "https://download.pytorch.org/whl/cu128" } },
@@ -2185,7 +2215,11 @@ requires-dist = [
     { name = "numpy", marker = "extra == 'cu128'", specifier = "==2.2.6" },
     { name = "paroquant", editable = "third_party/paroquant" },
     { name = "pillow", specifier = "==12.3.0" },
+    { name = "primefac", specifier = "==2.0.12" },
     { name = "qtip", editable = "third_party/qtip" },
+    { name = "quip-sharp", editable = "third_party/quip-sharp" },
+    { name = "quiptools-cuda", marker = "extra == 'cu124'", directory = "third_party/quip-sharp/quiptools" },
+    { name = "quiptools-cuda", marker = "extra == 'cu128'", directory = "third_party/quip-sharp/quiptools" },
     { name = "safetensors", specifier = ">=0.4.3,<1" },
     { name = "scipy", specifier = "==1.14.1" },
     { name = "setuptools", specifier = "==69.5.1" },

@@ -1,0 +1,36 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Zincwolf <zincwolf@outlook.com>
+Date: Tue, 8 Sep 2026 14:50:52 +0800
+Subject: [PATCH] Keep legacy lm_eval imports in the evaluation entry point
+
+---
+ eval/eval_zeroshot.py        | 3 ++-
+ quip_sharp/utils/__init__.py | 1 -
+ 2 files changed, 2 insertions(+), 2 deletions(-)
+
+diff --git a/eval/eval_zeroshot.py b/eval/eval_zeroshot.py
+index fa5a280..f44d0e2 100644
+--- a/eval/eval_zeroshot.py
++++ b/eval/eval_zeroshot.py
+@@ -9,7 +9,8 @@ import torch
+ from lm_eval import evaluator, tasks
+ from transformers import AutoTokenizer
+ 
+-from quip_sharp.utils import LMEvalAdaptor
++# Legacy lm_eval is needed only by this upstream evaluation entry point.
++from quip_sharp.utils.lm_eval_adaptor import LMEvalAdaptor
+ from quip_sharp.utils.unsafe_import import model_from_hf_path
+ 
+ parser = argparse.ArgumentParser()
+diff --git a/quip_sharp/utils/__init__.py b/quip_sharp/utils/__init__.py
+index 1801f6c..e464159 100644
+--- a/quip_sharp/utils/__init__.py
++++ b/quip_sharp/utils/__init__.py
+@@ -1,7 +1,6 @@
+ from .data_utils import *
+ from .finetune import *
+ from .graph_wrapper import *
+-from .lm_eval_adaptor import *
+ from .math_utils import *
+ from .matmul_had import *
+ from .matmul_kron import *

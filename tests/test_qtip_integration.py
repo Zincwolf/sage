@@ -169,9 +169,11 @@ def test_real_block_updates_fixed_indices_and_dense_reconstruction(tiny_qtip, dt
         torch.testing.assert_close(actual, expected, atol=2e-5, rtol=2e-5)
 
 
-@pytest.mark.skipif(torch.cuda.device_count() < 4, reason="NCCL integration requires four GPUs")
+@pytest.mark.parametrize("world_size", [2, 4])
 @pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
-def test_four_gpu_hessians_full_block_restart_and_hf_export(tiny_qtip, dtype):
+def test_multi_gpu_hessians_full_block_restart_and_hf_export(tiny_qtip, dtype, world_size):
+    if torch.cuda.device_count() < world_size:
+        pytest.skip(f"NCCL integration requires {world_size} GPUs")
     single, hf = tiny_qtip
     single = replace(single, model_dtype=str(dtype).removeprefix("torch."))
     model = Qwen3ForCausalLM(hf).to(dtype)
@@ -180,7 +182,11 @@ def test_four_gpu_hessians_full_block_restart_and_hf_export(tiny_qtip, dtype):
     PreTrainedTokenizerFast(tokenizer_object=tokenizer, unk_token="[UNK]").save_pretrained(
         single.model
     )
-    multiple = replace(single, devices=[0, 1, 2, 3], output_dir=single.output_dir.parent / "four")
+    multiple = replace(
+        single,
+        devices=list(range(world_size)),
+        output_dir=single.output_dir.parent / f"dp{world_size}",
+    )
     payload = {
         "protocol": single.calibration_recipe(),
         "hessian": torch.randint(0, 128, (9, 16)),
@@ -198,9 +204,9 @@ def test_four_gpu_hessians_full_block_restart_and_hf_export(tiny_qtip, dtype):
     for index in range(hf.num_hidden_layers):
         for name in ("qkv", "o", "up", "down"):
             one = torch.load(single.hessians / f"{index}_{name}.pt", weights_only=True)
-            four = torch.load(multiple.hessians / f"{index}_{name}.pt", weights_only=True)
-            assert one["ct"] == four["ct"] == 9 * 16
-            torch.testing.assert_close(one["flatH"], four["flatH"], atol=1e-6, rtol=1e-5)
+            many = torch.load(multiple.hessians / f"{index}_{name}.pt", weights_only=True)
+            assert one["ct"] == many["ct"] == 9 * 16
+            torch.testing.assert_close(one["flatH"], many["flatH"], atol=1e-6, rtol=1e-5)
             # Test quantize DP with the SAME published Hessian. Different FP32
             # reduction orders can flip near-tied discrete trellis decisions;
             # Hessian agreement is tested above, independently of that boundary.
@@ -232,28 +238,28 @@ def test_four_gpu_hessians_full_block_restart_and_hf_export(tiny_qtip, dtype):
     export(single)
     export(multiple)
     one_model = AutoModelForCausalLM.from_pretrained(single.exported_model, dtype="auto").eval()
-    four_model = AutoModelForCausalLM.from_pretrained(multiple.exported_model, dtype="auto").eval()
+    many_model = AutoModelForCausalLM.from_pretrained(multiple.exported_model, dtype="auto").eval()
     ids = torch.tensor([[1, 2, 3, 4]])
     with torch.no_grad():
         torch.testing.assert_close(
-            one_model(ids).logits, four_model(ids).logits, atol=1e-5, rtol=1e-5
+            one_model(ids).logits, many_model(ids).logits, atol=1e-5, rtol=1e-5
         )
     for name in ("model.embed_tokens.weight", "model.norm.weight", "lm_head.weight"):
         torch.testing.assert_close(
-            four_model.get_parameter(name), model.get_parameter(name), atol=0, rtol=0
+            many_model.get_parameter(name), model.get_parameter(name), atol=0, rtol=0
         )
     for index in range(hf.num_hidden_layers):
         auxiliary = torch.load(multiple.checkpoints / f"{index}.auxiliary.pt", weights_only=True)
         for name, value in auxiliary.items():
             torch.testing.assert_close(
-                four_model.get_parameter(f"model.layers.{index}.{name}"),
+                many_model.get_parameter(f"model.layers.{index}.{name}"),
                 value.to(dtype),
                 atol=0,
                 rtol=0,
             )
         for _, short, *_ in PROJECTIONS:
             one = torch.load(single.checkpoints / f"{index}_{short}.pt", weights_only=True)
-            four = torch.load(multiple.checkpoints / f"{index}_{short}.pt", weights_only=True)
-            torch.testing.assert_close(one["trellis"], four["trellis"], atol=0, rtol=0)
+            many = torch.load(multiple.checkpoints / f"{index}_{short}.pt", weights_only=True)
+            torch.testing.assert_close(one["trellis"], many["trellis"], atol=0, rtol=0)
     recipe = json.loads((multiple.checkpoints / "qtip_config.json").read_text())
     assert recipe["format"] == "qtip-blockwise-full-state-dense-qdq"

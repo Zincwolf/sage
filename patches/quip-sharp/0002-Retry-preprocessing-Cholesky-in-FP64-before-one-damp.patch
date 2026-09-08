@@ -1,0 +1,32 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Zincwolf <zincwolf@outlook.com>
+Date: Tue, 8 Sep 2026 14:29:19 +0800
+Subject: [PATCH] Retry preprocessing Cholesky in FP64 before one damped repair
+
+---
+ quip_sharp/algo/quip.py | 12 +++++++++++-
+ 1 file changed, 11 insertions(+), 1 deletion(-)
+
+diff --git a/quip_sharp/algo/quip.py b/quip_sharp/algo/quip.py
+index e877497..aa7c9e5 100644
+--- a/quip_sharp/algo/quip.py
++++ b/quip_sharp/algo/quip.py
+@@ -60,7 +60,17 @@ def incoherence_preprocess(H, W, args):
+     SV = SV.cpu()
+     SU = SU.cpu()
+ 
+-    Lhr = torch.linalg.cholesky(Hr)
++    try:
++        Lhr = torch.linalg.cholesky(Hr)
++    except torch.linalg.LinAlgError:
++        # Let quantize recompute from the original inputs in FP64 first.
++        if not args.use_fp64:
++            return None
++        # Only after FP64 fails, repair in the transformed coordinates once.
++        # Keep Hr consistent with Lhr for downstream LDLQ and low-rank work.
++        Hr = (Hr + Hr.T) * 0.5
++        Hr.diagonal().add_(Hr.diagonal().mean() * args.sigma_reg)
++        Lhr = torch.linalg.cholesky(Hr)
+     if not torch.all(torch.isfinite(Lhr)):
+         return None
+ 

@@ -1,0 +1,28 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Zincwolf <zincwolf@outlook.com>
+Date: Tue, 8 Sep 2026 14:50:52 +0800
+Subject: [PATCH] Declare static quiptools CUDA package metadata
+
+---
+ quiptools/pyproject.toml | 12 ++++++++++++
+ 1 file changed, 12 insertions(+)
+ create mode 100644 quiptools/pyproject.toml
+
+diff --git a/quiptools/pyproject.toml b/quiptools/pyproject.toml
+new file mode 100644
+index 0000000..645ba4c
+--- /dev/null
++++ b/quiptools/pyproject.toml
+@@ -0,0 +1,12 @@
++[project]
++name = "quiptools-cuda"
++version = "0.0.0"
++requires-python = ">=3.11"
++dependencies = ["torch"]
++
++[build-system]
++requires = ["setuptools>=69.5.1"]
++build-backend = "setuptools.build_meta"
++
++[tool.setuptools]
++packages = []

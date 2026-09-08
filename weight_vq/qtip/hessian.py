@@ -1,78 +1,18 @@
-"""Padding-aware QTIP Hessian collection."""
+"""QTIP's projection selection over the shared Hessian collectors."""
 
 from __future__ import annotations
 
 from operator import attrgetter
 from typing import cast
 
-import torch
 from torch import nn
 
-from weight_vq.qtip.distributed import DistributedContext
+from weight_vq.hessian import LinearHessianCollectors, MaskedHessianCollector
 
 
-class MaskedHessianCollector:
-    """Accumulate E[x x.T] over valid sequence positions."""
-
-    def __init__(self, module: nn.Linear, *, include_padding: bool = False) -> None:
-        self.size = module.in_features
-        self.include_padding = include_padding
-        self.matrix = torch.zeros(
-            self.size, self.size, dtype=torch.float32, device=module.weight.device
-        )
-        self.count = 0
-        self._position_mask: torch.Tensor | None = None
-        self._handle = module.register_forward_pre_hook(self._hook)
-
-    def set_position_mask(self, mask: torch.Tensor) -> None:
-        if mask.ndim != 2:
-            raise ValueError(f"Expected a [batch, sequence] mask, got {tuple(mask.shape)}")
-        self._position_mask = mask.detach().to(device=self.matrix.device, dtype=torch.bool)
-
-    @torch.no_grad()
-    def _hook(self, _module: nn.Module, inputs: tuple[torch.Tensor, ...]) -> None:
-        values = inputs[0]
-        if values.shape[-1] != self.size:
-            raise RuntimeError(f"Projection input width {values.shape[-1]} != {self.size}")
-        flattened = values.reshape(-1, self.size).float()
-        if not self.include_padding:
-            if self._position_mask is None:
-                raise RuntimeError("Position mask must be set before every layer forward")
-            flat_mask = self._position_mask.reshape(-1)
-            if flat_mask.numel() != flattened.shape[0]:
-                raise RuntimeError(
-                    "Projection input and position mask are misaligned: "
-                    f"{flattened.shape[0]} rows vs {flat_mask.numel()} mask entries"
-                )
-            flattened = flattened[flat_mask]
-        if flattened.numel() == 0:
-            return
-        self.matrix.addmm_(flattened.T, flattened)
-        self.count += flattened.shape[0]
-
-    def close_raw(self, distributed: DistributedContext | None = None) -> tuple[torch.Tensor, int]:
-        self._handle.remove()
-        count = self.count
-        if distributed is not None:
-            distributed.sum_(self.matrix)
-            count = int(distributed.global_count(count))
-        matrix = self.matrix.cpu()
-        self.matrix = torch.empty(0)
-        return matrix, count
-
-    def close(
-        self, distributed: DistributedContext | None = None
-    ) -> dict[str, torch.Tensor | int | str]:
-        matrix, count = self.close_raw(distributed)
-        matrix.div_(count)
-        rows, columns = torch.tril_indices(self.size, self.size)
-        flattened = matrix[rows, columns].contiguous()
-        return {
-            "flatH": flattened,
-            "n": self.size,
-            "ct": count,
-            "position_mask": "all" if self.include_padding else "attention_mask",
-        }
+class LayerHessianCollectors(LinearHessianCollectors):
+    def __init__(self, layer: nn.Module, *, include_padding: bool = False) -> None:
+        super().__init__(collector_modules(layer), include_padding=include_padding)
 
 
 def collector_modules(layer: nn.Module) -> dict[str, nn.Linear]:
@@ -84,18 +24,9 @@ def collector_modules(layer: nn.Module) -> dict[str, nn.Linear]:
     }
 
 
-class LayerHessianCollectors:
-    def __init__(self, layer: nn.Module, *, include_padding: bool = False) -> None:
-        self.collectors = {
-            name: MaskedHessianCollector(module, include_padding=include_padding)
-            for name, module in collector_modules(layer).items()
-        }
-
-    def set_position_mask(self, mask: torch.Tensor) -> None:
-        for collector in self.collectors.values():
-            collector.set_position_mask(mask)
-
-    def close(
-        self, distributed: DistributedContext | None = None
-    ) -> dict[str, dict[str, torch.Tensor | int | str]]:
-        return {name: collector.close(distributed) for name, collector in self.collectors.items()}
+__all__ = [
+    "LayerHessianCollectors",
+    "LinearHessianCollectors",
+    "MaskedHessianCollector",
+    "collector_modules",
+]
