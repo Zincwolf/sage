@@ -15,7 +15,13 @@ from lib.algo import finetune
 from lib.codebook.bitshift import bitshift_codebook
 from torch import nn
 from torch.multiprocessing.spawn import spawn
-from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer
+from transformers import (
+    AutoConfig,
+    AutoModelForCausalLM,
+    AutoModelForImageTextToText,
+    AutoProcessor,
+    AutoTokenizer,
+)
 
 from weight_vq import utils
 from weight_vq.qtip.artifacts import (
@@ -30,6 +36,7 @@ from weight_vq.qtip.calibration import calibration, load_calibration
 from weight_vq.qtip.config import QTIPConfig
 from weight_vq.qtip.distributed import process_group
 from weight_vq.qtip.hessian import LayerHessianCollectors
+from weight_vq.qtip.models import language_backbone
 from weight_vq.qtip.reconstruction import DistributedReconstruction
 from weight_vq.qtip.replay import capture_replay
 
@@ -38,9 +45,15 @@ Stage = Literal["hessian", "quantize"]
 
 def _model_contract(model: Path) -> tuple[str, int]:
     config = AutoConfig.from_pretrained(model, local_files_only=True)
-    if config.model_type != "qwen3":
-        raise ValueError(f"QTIP currently supports qwen3, got {config.model_type!r}")
-    return "qwen3", int(config.num_hidden_layers)
+    if config.model_type == "qwen3":
+        return "qwen3", int(config.num_hidden_layers)
+    if config.model_type == "mistral3" and config.text_config.model_type == "ministral3":
+        return "mistral3", int(config.text_config.num_hidden_layers)
+    raise ValueError(f"QTIP currently supports qwen3 and Ministral-3, got {config.model_type!r}")
+
+
+def model_loader(family: str):
+    return AutoModelForImageTextToText if family == "mistral3" else AutoModelForCausalLM
 
 
 def layer_range(config: QTIPConfig, model_layers: int) -> tuple[int, int]:
@@ -89,7 +102,8 @@ def _run_rank(
         dtype = cast(torch.dtype, getattr(torch, config.model_dtype))
         # Each worker loads independent CPU storage; no model tensors cross spawn.
         model = (
-            AutoModelForCausalLM.from_pretrained(
+            model_loader(family)
+            .from_pretrained(
                 config.model,
                 device_map="cpu",
                 dtype=dtype,
@@ -99,7 +113,7 @@ def _run_rank(
             .eval()
             .requires_grad_(False)
         )
-        layers = model.model.layers
+        layers = language_backbone(model).layers
         data = load_calibration(config)
         if stage == "hessian":
             accumulators: dict[tuple[int, str], tuple[torch.Tensor, int]] = {}
@@ -278,10 +292,12 @@ def export(config: QTIPConfig) -> None:
         raise RuntimeError(f"QTIP checkpoints are incomplete for layers: {missing}")
     if config.exported_model.exists():
         raise FileExistsError(f"refusing to overwrite {config.exported_model}")
-    model = AutoModelForCausalLM.from_pretrained(
-        config.model, dtype="auto", device_map="cpu", local_files_only=True
-    ).eval()
-    layers = model.model.layers
+    model = (
+        model_loader(family)
+        .from_pretrained(config.model, dtype="auto", device_map="cpu", local_files_only=True)
+        .eval()
+    )
+    layers = language_backbone(model).layers
     with torch.no_grad():
         for index in range(start, end):
             layer = layers[index]
@@ -302,22 +318,30 @@ def export(config: QTIPConfig) -> None:
     with tempfile.TemporaryDirectory(prefix=".export-", dir=config.output_dir) as temporary:
         staging = Path(temporary) / "model"
         model.save_pretrained(staging, safe_serialization=True, max_shard_size="5GB")
-        AutoTokenizer.from_pretrained(config.model, local_files_only=True).save_pretrained(staging)
+        if family == "mistral3":
+            AutoProcessor.from_pretrained(
+                config.model, local_files_only=True, fix_mistral_regex=True
+            ).save_pretrained(staging)
+        else:
+            AutoTokenizer.from_pretrained(config.model, local_files_only=True).save_pretrained(
+                staging
+            )
         shutil.copy2(config.checkpoints / "qtip_config.json", staging / "qtip_config.json")
         os.replace(staging, config.exported_model)
 
 
 def validate(config: QTIPConfig) -> None:
-    _, model_layers = _model_contract(config.model)
+    family, model_layers = _model_contract(config.model)
     start, end = layer_range(config, model_layers)
+    prefix = "model.language_model" if family == "mistral3" else "model"
     utils.validate_dense_model(
         config.exported_model,
-        model_loader=AutoModelForCausalLM,
+        model_loader=model_loader(family),
         weights=lambda model: (
             (name, model.get_parameter(f"{name}.weight"))
             for index in range(start, end)
             for attribute, *_ in PROJECTIONS
-            for name in (f"model.layers.{index}.{attribute}",)
+            for name in (f"{prefix}.layers.{index}.{attribute}",)
         ),
     )
 

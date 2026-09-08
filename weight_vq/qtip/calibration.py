@@ -50,7 +50,9 @@ def calibration(config: QTIPConfig) -> None:
     info = DatasetInfo.from_directory(str(config.dataset))
     files = sorted(config.dataset.glob("*-train-*-of-*.arrow"))
     dataset = concatenate_datasets([Dataset.from_file(str(path), info=info) for path in files])
-    tokenizer = AutoTokenizer.from_pretrained(config.model, local_files_only=True)
+    tokenizer = AutoTokenizer.from_pretrained(
+        config.model, local_files_only=True, fix_mistral_regex=True
+    )
     generator = torch.Generator().manual_seed(config.seed)
     hessian = sample_documents(
         dataset,

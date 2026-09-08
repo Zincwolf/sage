@@ -1,0 +1,44 @@
+# Ministral-3 8B blockwise W2, text-only RP calibration, no E2E.
+# Preserve the complete multimodal model; quantize only language decoder layers.
+model: /path/to/Ministral-3-8B-Instruct-2512-BF16
+dataset: /path/to/RedPajama/Arrows
+output_dir: /path/to/outputs/qtip/ministral-3-8b-rp-w2-blockwise
+
+devices: [0, 1, 2, 3]
+seed: 0
+layer_start: 0
+layer_end: null
+num_cpu_threads: 8
+model_dtype: bfloat16
+
+# QTIP Llama-3 specification migrated to Ministral, not validated by the paper.
+hessian_samples: 4096
+hessian_sequence_length: 8192
+train_samples: 256
+validation_samples: 128
+sequence_length: 2048
+
+# Global Hessian chunk; per-rank execution microbatches do not change global batch.
+hessian_chunk_size: 256
+forward_microbatch_size: 1
+reconstruction_microbatch_size: 1
+replay_device: cuda
+
+td_x: 16
+td_y: 16
+L: 16
+K: 2
+V: 2
+tlut_bits: 9
+decode_mode: quantlut_sym
+sigma_reg: 0.01
+scale_override: 0.9
+use_fp64: false
+
+reconstruction_epochs: 5
+learning_rate: 0.00005
+susv_learning_rate: 0.0005
+batch_size: 8
+# LUT uses the ordinary group as a migration choice, not a QuIP# prescription.
+train_lut: true
+gradient_checkpointing: false

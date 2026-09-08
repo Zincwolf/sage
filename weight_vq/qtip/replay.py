@@ -10,6 +10,7 @@ from torch import nn
 from transformers.masking_utils import create_causal_mask, create_sliding_window_causal_mask
 
 from weight_vq.qtip.hessian import LayerHessianCollectors
+from weight_vq.qtip.models import language_backbone
 
 
 @dataclass
@@ -23,7 +24,13 @@ class ReplayState:
         positions = torch.arange(hidden.shape[1], device=hidden.device).unsqueeze(0)
         mask_factory = (
             create_sliding_window_causal_mask
-            if getattr(layer, "attention_type", None) == "sliding_attention"
+            if (
+                getattr(layer, "attention_type", None) == "sliding_attention"
+                or (
+                    self.model_config.model_type == "ministral3"
+                    and self.model_config.sliding_window is not None
+                )
+            )
             else create_causal_mask
         )
         mask = mask_factory(
@@ -99,7 +106,7 @@ def capture_replay(
     microbatch_size: int,
     placement: str = "cuda",
 ) -> ReplayState:
-    backbone = model.model
+    backbone = language_backbone(model)
     embedding = backbone.embed_tokens.to(device)
     inputs = torch.empty(
         (*tokens.shape, embedding.embedding_dim),
