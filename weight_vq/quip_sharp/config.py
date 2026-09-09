@@ -29,7 +29,7 @@ class QuIPSharpConfig(BlockwiseConfig):
         return {
             **super().hessian_recipe(end),
             "statistic": "centered-token-covariance-and-mean",
-            "statistics_dtype": "float64",
+            "statistics_dtype": "float32",
         }
 
     def recipe(self, *, model_family: str, layer_end: int) -> dict[str, object]:

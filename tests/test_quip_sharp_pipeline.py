@@ -63,7 +63,7 @@ def test_method_owned_statistics_and_paper_defaults(tiny_quip):
     defaults = QuIPSharpConfig(config.model, config.dataset, config.output_dir, [0])
     assert defaults.hessian_samples == 6144
     assert defaults.hessian_sequence_length == 2048
-    assert defaults.hessian_recipe(1)["statistics_dtype"] == "float64"
+    assert defaults.hessian_recipe(1)["statistics_dtype"] == "float32"
     assert "statistics_dtype" not in {field.name for field in fields(defaults)}
     assert not defaults.use_fp64
 
@@ -78,7 +78,7 @@ def test_all_projections_reconstruct_and_export_weights(tiny_quip, dtype):
     train = capture_replay(model, tokens[:4], device="cuda:0", microbatch_size=1)
     valid = capture_replay(model, tokens[4:], device="cuda:0", microbatch_size=1)
     layer = model.model.layers[0].cuda()
-    collectors = LayerHessianCollectors(layer, include_padding=True, dtype=torch.float64)
+    collectors = LayerHessianCollectors(layer, include_padding=True, dtype=torch.float32)
     train_replay = train.forward_original(layer, device="cuda:0", collectors=collectors)
     valid_replay = valid.forward_original(layer, device="cuda:0")
     config.hessians.mkdir(parents=True)
@@ -113,7 +113,7 @@ def test_all_projections_reconstruct_and_export_weights(tiny_quip, dtype):
 
 
 @pytest.mark.skipif(torch.cuda.device_count() < 2, reason="NCCL integration requires two GPUs")
-def test_fp64_hessian_restart_and_hf_export(tiny_quip):
+def test_fp32_hessian_restart_and_hf_export(tiny_quip):
     single, hf = tiny_quip
     model = Qwen3ForCausalLM(hf)
     model.save_pretrained(single.model)
@@ -138,10 +138,10 @@ def test_fp64_hessian_restart_and_hf_export(tiny_quip):
     for name in ("qkv", "o", "up", "down"):
         one = torch.load(single.hessians / f"0_{name}.pt", weights_only=True)
         many = torch.load(multiple.hessians / f"0_{name}.pt", weights_only=True)
-        assert one["flatH"].dtype == one["mu"].dtype == torch.float64
+        assert one["flatH"].dtype == one["mu"].dtype == torch.float32
         assert one["ct"] == many["ct"] == 80
-        torch.testing.assert_close(one["flatH"], many["flatH"], rtol=1e-10, atol=1e-10)
-        torch.testing.assert_close(one["mu"], many["mu"], rtol=1e-10, atol=1e-10)
+        torch.testing.assert_close(one["flatH"], many["flatH"], rtol=1e-5, atol=1e-6)
+        torch.testing.assert_close(one["mu"], many["mu"], rtol=1e-5, atol=1e-6)
     quantize(multiple)
     original = torch.load(multiple.checkpoints / "0_v.pt", weights_only=True)
     stamp = (multiple.checkpoints / "0.complete").stat().st_mtime_ns

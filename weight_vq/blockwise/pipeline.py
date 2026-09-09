@@ -124,7 +124,6 @@ def _run_rank(
         data = load_calibration(config)
         if stage == "hessian":
             centered = isinstance(config, QuIPSharpConfig)
-            statistics_dtype = torch.float64 if centered else torch.float32
             accumulators: dict[tuple[int, str], tuple[torch.Tensor, torch.Tensor, int]] = {}
             for chunk in data["hessian"].split(config.hessian_chunk_size):
                 state = capture_replay(
@@ -136,8 +135,9 @@ def _run_rank(
                 )
                 for index in range(end):
                     layer = layers[index].to(distributed.device)
+                    # QuIP# upstream explicitly permits FP32 statistics on slow-FP64 GPUs.
                     collectors = (
-                        LayerHessianCollectors(layer, include_padding=True, dtype=statistics_dtype)
+                        LayerHessianCollectors(layer, include_padding=True, dtype=torch.float32)
                         if index >= start
                         else None
                     )
