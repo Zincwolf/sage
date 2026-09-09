@@ -1,0 +1,54 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Zincwolf <zincwolf@outlook.com>
+Date: Wed, 9 Sep 2026 11:17:07 +0800
+Subject: [PATCH] Stop tracking generated quiptools package metadata
+
+---
+ quiptools/quiptools_cuda.egg-info/PKG-INFO             | 3 ---
+ quiptools/quiptools_cuda.egg-info/SOURCES.txt          | 8 --------
+ quiptools/quiptools_cuda.egg-info/dependency_links.txt | 1 -
+ quiptools/quiptools_cuda.egg-info/top_level.txt        | 1 -
+ 4 files changed, 13 deletions(-)
+ delete mode 100644 quiptools/quiptools_cuda.egg-info/PKG-INFO
+ delete mode 100644 quiptools/quiptools_cuda.egg-info/SOURCES.txt
+ delete mode 100644 quiptools/quiptools_cuda.egg-info/dependency_links.txt
+ delete mode 100644 quiptools/quiptools_cuda.egg-info/top_level.txt
+
+diff --git a/quiptools/quiptools_cuda.egg-info/PKG-INFO b/quiptools/quiptools_cuda.egg-info/PKG-INFO
+deleted file mode 100644
+index ba3a41a..0000000
+--- a/quiptools/quiptools_cuda.egg-info/PKG-INFO
++++ /dev/null
+@@ -1,3 +0,0 @@
+-Metadata-Version: 2.1
+-Name: quiptools_cuda
+-Version: 0.0.0
+diff --git a/quiptools/quiptools_cuda.egg-info/SOURCES.txt b/quiptools/quiptools_cuda.egg-info/SOURCES.txt
+deleted file mode 100644
+index d2a166b..0000000
+--- a/quiptools/quiptools_cuda.egg-info/SOURCES.txt
++++ /dev/null
+@@ -1,8 +0,0 @@
+-quiptools.cu
+-quiptools_e8p_gemv.cu
+-quiptools_wrapper.cpp
+-setup.py
+-quiptools_cuda.egg-info/PKG-INFO
+-quiptools_cuda.egg-info/SOURCES.txt
+-quiptools_cuda.egg-info/dependency_links.txt
+-quiptools_cuda.egg-info/top_level.txt
+\ No newline at end of file
+diff --git a/quiptools/quiptools_cuda.egg-info/dependency_links.txt b/quiptools/quiptools_cuda.egg-info/dependency_links.txt
+deleted file mode 100644
+index 8b13789..0000000
+--- a/quiptools/quiptools_cuda.egg-info/dependency_links.txt
++++ /dev/null
+@@ -1 +0,0 @@
+-
+diff --git a/quiptools/quiptools_cuda.egg-info/top_level.txt b/quiptools/quiptools_cuda.egg-info/top_level.txt
+deleted file mode 100644
+index 7eb4156..0000000
+--- a/quiptools/quiptools_cuda.egg-info/top_level.txt
++++ /dev/null
+@@ -1 +0,0 @@
+-quiptools_cuda
