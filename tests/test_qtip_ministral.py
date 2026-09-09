@@ -118,6 +118,7 @@ def save_source(model, config):
         image_processor=PixtralImageProcessor(patch_size=4, size={"longest_edge": 16}),
         tokenizer=tokenizer,
     ).save_pretrained(config.model)
+    (config.model / "tekken.json").write_text("tekken fixture")
 
 
 def test_export_preserves_multimodal_shell(ministral, monkeypatch, capsys):
@@ -155,6 +156,7 @@ def test_export_preserves_multimodal_shell(ministral, monkeypatch, capsys):
     processor = AutoProcessor.from_pretrained(config.exported_model, local_files_only=True)
     assert processor.chat_template == "{{ messages[0]['content'] }}"
     assert processor.image_processor.patch_size == 4
+    assert (config.exported_model / "tekken.json").read_text() == "tekken fixture"
     for name, value in untouched.items():
         torch.testing.assert_close(restored.get_parameter(name), value, atol=0, rtol=0)
     with torch.no_grad():

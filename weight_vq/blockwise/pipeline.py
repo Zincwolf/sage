@@ -354,6 +354,7 @@ def export(config: Config) -> None:
             AutoProcessor.from_pretrained(
                 config.model, local_files_only=True, fix_mistral_regex=True
             ).save_pretrained(staging)
+            shutil.copy2(config.model / "tekken.json", staging / "tekken.json")
         else:
             AutoTokenizer.from_pretrained(config.model, local_files_only=True).save_pretrained(
                 staging
