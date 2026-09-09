@@ -4,12 +4,12 @@
 
 ## 支持列表
 
-| Model                              | QuIP# | QTIP | SPHQuant |
-| ---------------------------------- | ----- | ---- | -------- |
-| Qwen3-4B-Instruct-2507             | ✅     | ✅    | ✅        |
-| Qwen3-30B-A3B-Instruct-2507        |       |      |          |
-| Ministral-3-8B-Instruct-2512-BF16  | ✅     | ✅    |          |
-| Ministral-3-14B-Instruct-2512-BF16 | ✅     | ✅    |          |
+| Model                              | QuIP# | QTIP | UniSVQ | SPHQuant |
+| ---------------------------------- | ----- | ---- | ------ | -------- |
+| Qwen3-4B-Instruct-2507             | ✅     | ✅    | ✅      | ✅        |
+| Qwen3-30B-A3B-Instruct-2507        |       |      |        |          |
+| Ministral-3-8B-Instruct-2512-BF16  | ✅     | ✅    | ✅      |          |
+| Ministral-3-14B-Instruct-2512-BF16 | ✅     | ✅    | ✅      |          |
 
 ## 环境
 

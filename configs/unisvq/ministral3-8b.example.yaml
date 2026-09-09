@@ -1,0 +1,10 @@
+# Same released PTQ defaults as Qwen3; text decoder only, retain multimodal shell.
+model: /path/to/Ministral-3-8B-Instruct-2512-BF16
+dataset: /path/to/RedPajama/Arrows
+output_dir: /path/to/outputs/unisvq/ministral3-8b
+devices: [0]
+model_dtype: bfloat16
+replay_device: cpu
+hessian_chunk_size: 128
+forward_microbatch_size: 1
+reconstruction_microbatch_size: 1

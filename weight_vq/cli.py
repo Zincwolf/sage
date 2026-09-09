@@ -16,13 +16,18 @@ from weight_vq.qtip.config import QTIPConfig
 from weight_vq.quip_sharp.config import QuIPSharpConfig
 from weight_vq.sphquant import pipeline as sphquant_pipeline
 from weight_vq.sphquant.config import SPHQuantConfig
+from weight_vq.unisvq.config import UniSVQConfig
 
 Stage = Callable[[Any], None]
 ConfigType = type[Any]
 
 STAGES: dict[tuple[str, str], tuple[Stage, ConfigType]] = {
     (method, stage): (getattr(blockwise_pipeline, stage), config_type)
-    for method, config_type in (("qtip", QTIPConfig), ("quip-sharp", QuIPSharpConfig))
+    for method, config_type in (
+        ("qtip", QTIPConfig),
+        ("quip-sharp", QuIPSharpConfig),
+        ("unisvq", UniSVQConfig),
+    )
     for stage in ("calibration", "hessian", "quantize", "export", "validate", "run")
 }
 STAGES.update(

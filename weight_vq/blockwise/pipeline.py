@@ -42,8 +42,12 @@ from weight_vq.qtip.config import QTIPConfig
 from weight_vq.quip_sharp.config import QuIPSharpConfig
 from weight_vq.quip_sharp.quantization import quantize_layer
 from weight_vq.quip_sharp.quantization import reconstruct_dense_weight as reconstruct_quip_weight
+from weight_vq.unisvq.config import UniSVQConfig
+from weight_vq.unisvq.quantization import quantize_layer as quantize_unisvq_layer
+from weight_vq.unisvq.quantization import reconstruct_dense_weight as reconstruct_unisvq_weight
+from weight_vq.unisvq.reconstruction import UniSVQReconstruction
 
-Config = QTIPConfig | QuIPSharpConfig
+Config = QTIPConfig | QuIPSharpConfig | UniSVQConfig
 Stage = Literal["hessian", "quantize"]
 
 
@@ -73,7 +77,9 @@ def _tlut_path(config: QTIPConfig) -> Path:
 def _initialize_run(config: Config, family: str, end: int) -> None:
     config.checkpoints.mkdir(parents=True, exist_ok=True)
     recipe = config.recipe(model_family=family, layer_end=end)
-    method = "qtip" if isinstance(config, QTIPConfig) else "quip_sharp"
+    method = {QTIPConfig: "qtip", QuIPSharpConfig: "quip_sharp", UniSVQConfig: "unisvq"}[
+        type(config)
+    ]
     recipe_path = config.checkpoints / f"{method}_config.json"
     if recipe_path.exists():
         if json.loads(recipe_path.read_text()) != recipe:
@@ -123,7 +129,7 @@ def _run_rank(
         layers = language_backbone(model).layers
         data = load_calibration(config)
         if stage == "hessian":
-            centered = isinstance(config, QuIPSharpConfig)
+            centered = isinstance(config, (QuIPSharpConfig, UniSVQConfig))
             accumulators: dict[tuple[int, str], tuple[torch.Tensor, torch.Tensor, int]] = {}
             for chunk in data["hessian"].split(config.hessian_chunk_size):
                 state = capture_replay(
@@ -135,7 +141,7 @@ def _run_rank(
                 )
                 for index in range(end):
                     layer = layers[index].to(distributed.device)
-                    # QuIP# upstream explicitly permits FP32 statistics on slow-FP64 GPUs.
+                    # FP32 statistics are deliberate on RTX 6000D, including UniSVQ.
                     collectors = (
                         LayerHessianCollectors(layer, include_padding=True, dtype=torch.float32)
                         if index >= start
@@ -221,7 +227,12 @@ def _run_rank(
                 if distributed.is_primary:
                     (config.checkpoints / f"{index}.complete").unlink(missing_ok=True)
                 layer.requires_grad_(True)
-                reconstruction = DistributedReconstruction(
+                trainer = (
+                    UniSVQReconstruction
+                    if isinstance(config, UniSVQConfig)
+                    else DistributedReconstruction
+                )
+                reconstruction = trainer(
                     train_layer, validation_layer, config, distributed, config.seed + index
                 )
                 if isinstance(config, QTIPConfig):
@@ -237,6 +248,10 @@ def _run_rank(
                         reconstruction_callback=reconstruction,
                         write_checkpoints=distributed.is_primary,
                     )
+                elif isinstance(config, UniSVQConfig):
+                    quantize_unisvq_layer(
+                        layer, index, config, cast(UniSVQReconstruction, reconstruction)
+                    )
                 else:
                     quantize_layer(layer, index, config, reconstruction)
                 if distributed.is_primary:
@@ -246,6 +261,16 @@ def _run_rank(
                         for name, value in layer.state_dict().items()
                         if not name.startswith(prefixes) or name.endswith(".bias")
                     }
+                    if isinstance(config, UniSVQConfig):
+                        # Released quantize_llama_layer/hfize persist only these norms.
+                        # q/k norm parameters are trained upstream but discarded at export;
+                        # preserve that behavior rather than silently improve the method.
+                        auxiliary = {
+                            name: value
+                            for name, value in auxiliary.items()
+                            if name in ("input_layernorm.weight", "post_attention_layernorm.weight")
+                            or name.endswith(".bias")
+                        }
                     utils.atomic_torch_save(auxiliary, config.checkpoints / f"{index}.auxiliary.pt")
                     atomic_write_completion(index, config.checkpoints)
                 distributed.barrier()
@@ -306,7 +331,9 @@ def quantize(config: Config) -> None:
 def export(config: Config) -> None:
     family, model_layers = _model_contract(config.model)
     start, end = layer_range(config, model_layers)
-    method = "qtip" if isinstance(config, QTIPConfig) else "quip_sharp"
+    method = {QTIPConfig: "qtip", QuIPSharpConfig: "quip_sharp", UniSVQConfig: "unisvq"}[
+        type(config)
+    ]
     recipe_name = f"{method}_config.json"
     recipe = json.loads((config.checkpoints / recipe_name).read_text())
     if recipe != config.recipe(model_family=family, layer_end=end):
@@ -334,11 +361,16 @@ def export(config: Config) -> None:
                     weights_only=True,
                 )
                 linear = attrgetter(attribute)(layer)
-                weight = (
-                    reconstruct_dense_weight(saved, recipe)
-                    if isinstance(config, QTIPConfig)
-                    else reconstruct_quip_weight(saved, torch.device(f"cuda:{config.devices[0]}"))
-                )
+                if isinstance(config, QTIPConfig):
+                    weight = reconstruct_dense_weight(saved, recipe)
+                elif isinstance(config, UniSVQConfig):
+                    weight = reconstruct_unisvq_weight(
+                        saved, torch.device(f"cuda:{config.devices[0]}")
+                    )
+                else:
+                    weight = reconstruct_quip_weight(
+                        saved, torch.device(f"cuda:{config.devices[0]}")
+                    )
                 linear.weight.copy_(weight.to(linear.weight.dtype))
                 del weight
             auxiliary = torch.load(

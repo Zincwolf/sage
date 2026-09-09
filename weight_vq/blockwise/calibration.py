@@ -10,6 +10,7 @@ from transformers import AutoTokenizer
 
 from weight_vq import utils
 from weight_vq.blockwise.config import BlockwiseConfig
+from weight_vq.unisvq.config import UniSVQConfig
 
 
 def sample_documents(
@@ -20,6 +21,7 @@ def sample_documents(
     length: int,
     concatenate: bool,
     generator: torch.Generator,
+    truncate_documents: bool = False,
 ) -> torch.Tensor:
     result = torch.empty(samples * length, dtype=torch.int64)
     written = 0
@@ -29,8 +31,8 @@ def sample_documents(
         index = torch.randint(len(dataset), (1,), generator=generator).item()
         encoded = tokenizer(
             dataset[int(index)]["text"],
-            truncation=not concatenate,
-            **({} if concatenate else {"max_length": length}),
+            truncation=truncate_documents or not concatenate,
+            **({} if concatenate and not truncate_documents else {"max_length": length}),
             padding=False,
             return_attention_mask=False,
         )["input_ids"]
@@ -61,14 +63,16 @@ def calibration(config: BlockwiseConfig) -> None:
         length=config.hessian_sequence_length,
         concatenate=True,
         generator=generator,
+        truncate_documents=isinstance(config, UniSVQConfig),
     )
     reconstruction = sample_documents(
         dataset,
         tokenizer,
         samples=config.train_samples + config.validation_samples,
         length=config.sequence_length,
-        concatenate=False,
+        concatenate=isinstance(config, UniSVQConfig),
         generator=generator,
+        truncate_documents=isinstance(config, UniSVQConfig),
     )
     utils.atomic_torch_save(
         {

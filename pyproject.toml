@@ -11,6 +11,7 @@ dependencies = [
     "primefac==2.0.12",
     "qtip",
     "quip-sharp",
+    "unisvq",
     "safetensors>=0.4.3,<1",
     "scipy==1.14.1",
     "setuptools==69.5.1",
@@ -74,6 +75,7 @@ fast-hadamard-transform = { path = "third_party/fast-hadamard-transform" }
 paroquant = { path = "third_party/paroquant", editable = true }
 qtip = { path = "third_party/qtip", editable = true }
 quip-sharp = { path = "third_party/quip-sharp", editable = true }
+unisvq = { path = "third_party/unisvq", editable = true }
 quiptools-cuda = { path = "third_party/quip-sharp/quiptools" }
 torch = [
     { index = "pytorch-cu124", extra = "cu124" },
@@ -149,4 +151,4 @@ typeCheckingMode = "standard"
 pythonVersion = "3.11"
 include = ["weight_vq", "tests"]
 exclude = ["third_party"]
-extraPaths = ["third_party/qtip", "third_party/paroquant", "third_party/quip-sharp"]
+extraPaths = ["third_party/qtip", "third_party/paroquant", "third_party/quip-sharp", "third_party/unisvq"]

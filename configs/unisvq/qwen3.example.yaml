@@ -1,0 +1,33 @@
+# Author's released W2 PTQ entry at 449e8e4, not the paper or LC-QAT.
+model: /path/to/Qwen3-4B-Instruct-2507
+dataset: /path/to/RedPajama/Arrows
+output_dir: /path/to/outputs/unisvq/qwen3-4b
+devices: [0]
+model_dtype: bfloat16
+seed: 0
+
+# Upstream independently samples truncated-document concatenations for each stage.
+hessian_samples: 1024
+hessian_sequence_length: 4096
+train_samples: 896
+validation_samples: 128
+sequence_length: 4096
+
+# Execution controls; independent of logical training batch/accumulation below.
+hessian_chunk_size: 128
+forward_microbatch_size: 1
+reconstruction_microbatch_size: 1
+replay_device: cpu
+num_cpu_threads: 8
+
+# Fixed identical W2 grid and 128-block RHT; Hessian statistics always FP32.
+sigma_reg: 0.01
+scale_override: 0.83
+quip_tune_iters: 10
+reconstruction_epochs: 1
+learning_rate: 0.00005
+susv_learning_rate: 0.0005
+batch_size: 4
+gradient_accumulation_steps: 2
+early_stop: 3
+gradient_checkpointing: false

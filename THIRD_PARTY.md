@@ -7,9 +7,10 @@ Third-party code remains in clean submodules pinned by the parent repository. Lo
 | Fast Hadamard Transform | <https://github.com/Dao-AILab/fast-hadamard-transform> | `4ea722e434e3d4f2a14522341959ebdbe62be2de` | BSD-3-Clause | CUDA Hadamard transform used by QTIP incoherence processing |
 | QTIP | <https://github.com/Cornell-RelaxML/qtip> | `e90c6688c8dfae326a3a81b5eb032db7c6680ec0` | GPL-3.0-only | Bitshift-trellis quantization |
 | QuIP-Sharp | <https://github.com/Cornell-RelaxML/quip-sharp> | `1d8f873e9a2a8b86b12bb1064c312c5689b77d98` | GPL-3.0-only | E8P codebooks and LDLQ |
+| UniSVQ | <https://github.com/AI9Stars/UniSVQ> | `449e8e4f317d2c539d7135c39f66817adce3cf4c` | Not specified upstream; includes QuIP-derived code | Author's released PTQ: identical codebook and 128-block Hadamard |
 | ParoQuant | <https://github.com/z-lab/paroquant> | `f74a96c306f7db3938e758d7dbc945d450f9f23f` | MIT | SPHQuant optimization and dense conversion |
 
-The original license texts remain in each submodule. Model checkpoints and calibration datasets are not distributed and remain subject to their own terms.
+The original license texts, where provided, remain in each submodule. UniSVQ's pinned snapshot contains no LICENSE file; its redistribution terms and QuIP-derived code provenance need clarification before distributing that component. Model checkpoints and calibration datasets are not distributed and remain subject to their own terms.
 
 ## Submodule patch maintenance
 

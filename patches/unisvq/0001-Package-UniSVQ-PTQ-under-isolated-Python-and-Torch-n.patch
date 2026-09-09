@@ -1,0 +1,411 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Zincwolf <zincwolf@outlook.com>
+Date: Wed, 9 Sep 2026 15:39:14 +0800
+Subject: [PATCH] Package UniSVQ PTQ under isolated Python and Torch namespaces
+
+---
+ .gitignore                                     |   3 +++
+ model/general_model.py                         |   4 ++--
+ model/lc_qat_linear.py                         |   2 +-
+ pyproject.toml                                 |  17 +++++++++++++++++
+ quantize/hessian_general_model.py              |   2 +-
+ quantize/hfize.py                              |   4 ++--
+ quantize/quantize_finetune.py                  |   4 ++--
+ scripts/create_qwen3_ckpt_from_quip.py         |   2 +-
+ {lib => unisvq}/__init__.py                    |   0
+ {lib => unisvq}/algo/__init__.py               |   0
+ {lib => unisvq}/algo/finetune.py               |   4 ++--
+ {lib => unisvq}/algo/quip.py                   |   2 +-
+ {lib => unisvq}/codebook/__init__.py           |   0
+ {lib => unisvq}/codebook/index_codebook.py     |   0
+ .../codebook/index_guassian_codebook.py        |   0
+ {lib => unisvq}/codebook/ortho_dim4.pt         | Bin
+ {lib => unisvq}/linear/__init__.py             |   0
+ {lib => unisvq}/linear/quantized_linear.py     |   4 ++--
+ {lib => unisvq}/utils/__init__.py              |   0
+ {lib => unisvq}/utils/data_utils.py            |   2 +-
+ {lib => unisvq}/utils/finetune.py              |   0
+ {lib => unisvq}/utils/gptq_data_utils.py       |   0
+ {lib => unisvq}/utils/graph_wrapper.py         |   0
+ {lib => unisvq}/utils/hadamard.mod.safetensors | Bin
+ {lib => unisvq}/utils/lm_eval_adaptor.py       |   0
+ {lib => unisvq}/utils/math_utils.py            |   0
+ {lib => unisvq}/utils/matmul_had.py            |  16 ++++++++--------
+ {lib => unisvq}/utils/misc.py                  |   2 +-
+ {lib => unisvq}/utils/model_version.py         |   0
+ {lib => unisvq}/utils/shard_model.py           |   4 ++--
+ {lib => unisvq}/utils/unsafe_import.py         |   0
+ 31 files changed, 46 insertions(+), 26 deletions(-)
+ create mode 100644 pyproject.toml
+ rename {lib => unisvq}/__init__.py (100%)
+ rename {lib => unisvq}/algo/__init__.py (100%)
+ rename {lib => unisvq}/algo/finetune.py (99%)
+ rename {lib => unisvq}/algo/quip.py (99%)
+ rename {lib => unisvq}/codebook/__init__.py (100%)
+ rename {lib => unisvq}/codebook/index_codebook.py (100%)
+ rename {lib => unisvq}/codebook/index_guassian_codebook.py (100%)
+ rename {lib => unisvq}/codebook/ortho_dim4.pt (100%)
+ rename {lib => unisvq}/linear/__init__.py (100%)
+ rename {lib => unisvq}/linear/quantized_linear.py (98%)
+ rename {lib => unisvq}/utils/__init__.py (100%)
+ rename {lib => unisvq}/utils/data_utils.py (99%)
+ rename {lib => unisvq}/utils/finetune.py (100%)
+ rename {lib => unisvq}/utils/gptq_data_utils.py (100%)
+ rename {lib => unisvq}/utils/graph_wrapper.py (100%)
+ rename {lib => unisvq}/utils/hadamard.mod.safetensors (100%)
+ rename {lib => unisvq}/utils/lm_eval_adaptor.py (100%)
+ rename {lib => unisvq}/utils/math_utils.py (100%)
+ rename {lib => unisvq}/utils/matmul_had.py (83%)
+ rename {lib => unisvq}/utils/misc.py (98%)
+ rename {lib => unisvq}/utils/model_version.py (100%)
+ rename {lib => unisvq}/utils/shard_model.py (95%)
+ rename {lib => unisvq}/utils/unsafe_import.py (100%)
+
+diff --git a/.gitignore b/.gitignore
+index eea81f3..8e5fe30 100644
+--- a/.gitignore
++++ b/.gitignore
+@@ -28,3 +28,6 @@ test.py
+ *.tar
+ .claude/
+ .venv/
++build/
++dist/
++*.egg-info/
+diff --git a/model/general_model.py b/model/general_model.py
+index 2bbb40f..98e3e26 100644
+--- a/model/general_model.py
++++ b/model/general_model.py
+@@ -7,8 +7,8 @@ from torch import nn
+ from transformers import AutoConfig, AutoModelForCausalLM, PreTrainedModel
+ from accelerate import init_empty_weights, load_checkpoint_and_dispatch, infer_auto_device_map
+ 
+-from lib.linear.quantized_linear import QuantizedLinear
+-from lib.codebook import codebook_id as codebook_id_dict
++from unisvq.linear.quantized_linear import QuantizedLinear
++from unisvq.codebook import codebook_id as codebook_id_dict
+ 
+ 
+ def find_layers(module: nn.Module, layers=[nn.Linear], name=''):
+diff --git a/model/lc_qat_linear.py b/model/lc_qat_linear.py
+index 2441a71..720daf2 100644
+--- a/model/lc_qat_linear.py
++++ b/model/lc_qat_linear.py
+@@ -6,7 +6,7 @@ import torch.nn.init as init
+ import torch.nn.functional as F
+ import torch.distributed as dist
+ 
+-from lib.utils.matmul_had import matmul_hadU_cuda_blockwise
++from unisvq.utils.matmul_had import matmul_hadU_cuda_blockwise
+ 
+ 
+ def power_derivative(w, delta, k, power_clamp_max):
+diff --git a/pyproject.toml b/pyproject.toml
+new file mode 100644
+index 0000000..61573e7
+--- /dev/null
++++ b/pyproject.toml
+@@ -0,0 +1,17 @@
++[build-system]
++requires = ["setuptools>=69.5.1"]
++build-backend = "setuptools.build_meta"
++
++[project]
++name = "unisvq"
++version = "0.0.0"
++description = "UniSVQ upstream PTQ components under an isolated package name"
++requires-python = ">=3.11"
++# Runtime dependencies are selected by the parent project's cu124/cu128 extras,
++# as for the other method packages. Do not select a second CUDA/Torch stack here.
++
++[tool.setuptools.packages.find]
++include = ["unisvq*"]
++
++[tool.setuptools.package-data]
++unisvq = ["codebook/*.pt", "utils/*.safetensors"]
+diff --git a/quantize/hessian_general_model.py b/quantize/hessian_general_model.py
+index 96fb7a8..07533f7 100644
+--- a/quantize/hessian_general_model.py
++++ b/quantize/hessian_general_model.py
+@@ -11,7 +11,7 @@ import torch
+ from transformers import AutoModelForCausalLM, AutoTokenizer, AutoConfig
+ from transformers.modeling_attn_mask_utils import _prepare_4d_causal_attention_mask
+ 
+-from lib import utils
++from unisvq import utils
+ 
+ parser = argparse.ArgumentParser()
+ parser.add_argument('--seed', default=0, type=int)
+diff --git a/quantize/hfize.py b/quantize/hfize.py
+index ed2665b..9bfdc97 100644
+--- a/quantize/hfize.py
++++ b/quantize/hfize.py
+@@ -8,8 +8,8 @@ import tqdm
+ import torch
+ from transformers import AutoModelForCausalLM, AutoTokenizer, AutoConfig
+ 
+-from lib import codebook, utils
+-from lib.utils.model_version import MODEL_VERSION
++from unisvq import codebook, utils
++from unisvq.utils.model_version import MODEL_VERSION
+ from model.general_model import format_quantize_model
+ 
+ torch.set_grad_enabled(False)
+diff --git a/quantize/quantize_finetune.py b/quantize/quantize_finetune.py
+index 1f59975..db781ce 100644
+--- a/quantize/quantize_finetune.py
++++ b/quantize/quantize_finetune.py
+@@ -10,8 +10,8 @@ import tqdm
+ import torch
+ from transformers import AutoModelForCausalLM, AutoTokenizer, AutoConfig
+ from transformers.modeling_attn_mask_utils import _prepare_4d_causal_attention_mask
+-from lib import codebook, utils
+-from lib.algo import finetune
++from unisvq import codebook, utils
++from unisvq.algo import finetune
+ 
+ 
+ parser = argparse.ArgumentParser()
+diff --git a/scripts/create_qwen3_ckpt_from_quip.py b/scripts/create_qwen3_ckpt_from_quip.py
+index 7c8f60d..2a011d9 100644
+--- a/scripts/create_qwen3_ckpt_from_quip.py
++++ b/scripts/create_qwen3_ckpt_from_quip.py
+@@ -17,7 +17,7 @@ import torch.nn.functional as F
+ from safetensors import safe_open, SafetensorError
+ from transformers import AutoTokenizer
+ from model.modeling_qwen3_vq import Qwen3LCQATConfig, Qwen3LCQATForCausalLM, LCQATHadLinear
+-from lib.utils.matmul_had import matmul_hadU_cuda_blockwise
++from unisvq.utils.matmul_had import matmul_hadU_cuda_blockwise
+ 
+ parser = argparse.ArgumentParser()
+ parser.add_argument("--ori_model_path", type=str)
+diff --git a/lib/__init__.py b/unisvq/__init__.py
+similarity index 100%
+rename from lib/__init__.py
+rename to unisvq/__init__.py
+diff --git a/lib/algo/__init__.py b/unisvq/algo/__init__.py
+similarity index 100%
+rename from lib/algo/__init__.py
+rename to unisvq/algo/__init__.py
+diff --git a/lib/algo/finetune.py b/unisvq/algo/finetune.py
+similarity index 99%
+rename from lib/algo/finetune.py
+rename to unisvq/algo/finetune.py
+index c29ebe0..8607545 100644
+--- a/lib/algo/finetune.py
++++ b/unisvq/algo/finetune.py
+@@ -9,8 +9,8 @@ import glog
+ import torch
+ from torch import nn
+ 
+-from lib import codebook, utils
+-from lib.linear import *
++from unisvq import codebook, utils
++from unisvq.linear import *
+ 
+ from . import quip
+ 
+diff --git a/lib/algo/quip.py b/unisvq/algo/quip.py
+similarity index 99%
+rename from lib/algo/quip.py
+rename to unisvq/algo/quip.py
+index 4bdebe8..a6b1d76 100644
+--- a/lib/algo/quip.py
++++ b/unisvq/algo/quip.py
+@@ -4,7 +4,7 @@ import os
+ import glog
+ import torch
+ 
+-from lib import utils
++from unisvq import utils
+ 
+ 
+ def RHT_H(H, SU):
+diff --git a/lib/codebook/__init__.py b/unisvq/codebook/__init__.py
+similarity index 100%
+rename from lib/codebook/__init__.py
+rename to unisvq/codebook/__init__.py
+diff --git a/lib/codebook/index_codebook.py b/unisvq/codebook/index_codebook.py
+similarity index 100%
+rename from lib/codebook/index_codebook.py
+rename to unisvq/codebook/index_codebook.py
+diff --git a/lib/codebook/index_guassian_codebook.py b/unisvq/codebook/index_guassian_codebook.py
+similarity index 100%
+rename from lib/codebook/index_guassian_codebook.py
+rename to unisvq/codebook/index_guassian_codebook.py
+diff --git a/lib/codebook/ortho_dim4.pt b/unisvq/codebook/ortho_dim4.pt
+similarity index 100%
+rename from lib/codebook/ortho_dim4.pt
+rename to unisvq/codebook/ortho_dim4.pt
+diff --git a/lib/linear/__init__.py b/unisvq/linear/__init__.py
+similarity index 100%
+rename from lib/linear/__init__.py
+rename to unisvq/linear/__init__.py
+diff --git a/lib/linear/quantized_linear.py b/unisvq/linear/quantized_linear.py
+similarity index 98%
+rename from lib/linear/quantized_linear.py
+rename to unisvq/linear/quantized_linear.py
+index 5f69f0a..de3b074 100644
+--- a/lib/linear/quantized_linear.py
++++ b/unisvq/linear/quantized_linear.py
+@@ -3,8 +3,8 @@ import time
+ import torch
+ import torch.nn as nn
+ 
+-from lib import codebook
+-from lib.utils import clean, dtype_from_str, get_hadK
++from unisvq import codebook
++from unisvq.utils import clean, dtype_from_str, get_hadK
+ 
+ 
+ class QuantizedLinear(nn.Module):
+diff --git a/lib/utils/__init__.py b/unisvq/utils/__init__.py
+similarity index 100%
+rename from lib/utils/__init__.py
+rename to unisvq/utils/__init__.py
+diff --git a/lib/utils/data_utils.py b/unisvq/utils/data_utils.py
+similarity index 99%
+rename from lib/utils/data_utils.py
+rename to unisvq/utils/data_utils.py
+index 8299727..691e8e0 100644
+--- a/lib/utils/data_utils.py
++++ b/unisvq/utils/data_utils.py
+@@ -6,7 +6,7 @@ import torch
+ from datasets import load_dataset
+ from torch.utils.data import DataLoader, Dataset
+ 
+-from lib import codebook
++from unisvq import codebook
+ from .matmul_had import matmul_hadU
+ 
+ 
+diff --git a/lib/utils/finetune.py b/unisvq/utils/finetune.py
+similarity index 100%
+rename from lib/utils/finetune.py
+rename to unisvq/utils/finetune.py
+diff --git a/lib/utils/gptq_data_utils.py b/unisvq/utils/gptq_data_utils.py
+similarity index 100%
+rename from lib/utils/gptq_data_utils.py
+rename to unisvq/utils/gptq_data_utils.py
+diff --git a/lib/utils/graph_wrapper.py b/unisvq/utils/graph_wrapper.py
+similarity index 100%
+rename from lib/utils/graph_wrapper.py
+rename to unisvq/utils/graph_wrapper.py
+diff --git a/lib/utils/hadamard.mod.safetensors b/unisvq/utils/hadamard.mod.safetensors
+similarity index 100%
+rename from lib/utils/hadamard.mod.safetensors
+rename to unisvq/utils/hadamard.mod.safetensors
+diff --git a/lib/utils/lm_eval_adaptor.py b/unisvq/utils/lm_eval_adaptor.py
+similarity index 100%
+rename from lib/utils/lm_eval_adaptor.py
+rename to unisvq/utils/lm_eval_adaptor.py
+diff --git a/lib/utils/math_utils.py b/unisvq/utils/math_utils.py
+similarity index 100%
+rename from lib/utils/math_utils.py
+rename to unisvq/utils/math_utils.py
+diff --git a/lib/utils/matmul_had.py b/unisvq/utils/matmul_had.py
+similarity index 83%
+rename from lib/utils/matmul_had.py
+rename to unisvq/utils/matmul_had.py
+index bdcdae7..3a09c3c 100644
+--- a/lib/utils/matmul_had.py
++++ b/unisvq/utils/matmul_had.py
+@@ -5,7 +5,7 @@ import torch
+ from safetensors import safe_open
+ import fast_hadamard_transform
+ 
+-from lib import utils
++from unisvq import utils
+ 
+ hadamard_mats = {}
+ with safe_open(join(dirname(__file__), "hadamard.mod.safetensors"), framework="pt", device="cpu") as f:
+@@ -47,13 +47,13 @@ def matmul_hadU(X, transpose=False):
+ def matmul_hadUt(X):
+     return matmul_hadU(X, transpose=True)
+ 
+-torch.library.define("quip_lib::hadamard", "(Tensor x, float scale) -> Tensor")
++torch.library.define("unisvq_lib::hadamard", "(Tensor x, float scale) -> Tensor")
+ 
+-@torch.library.register_fake("quip_lib::hadamard")
++@torch.library.register_fake("unisvq_lib::hadamard")
+ def hadamard_abstract(x: torch.Tensor, scale: float) -> torch.Tensor:
+     return x
+ 
+-@torch.library.impl("quip_lib::hadamard", "default")
++@torch.library.impl("unisvq_lib::hadamard", "default")
+ def hadamard(x: torch.Tensor, scale: float) -> torch.Tensor:
+     return fast_hadamard_transform.hadamard_transform(x, scale)
+ 
+@@ -62,10 +62,10 @@ def matmul_hadU_cuda(X, hadK, K, transpose=False):
+     n = 128
+     input = X.float().view(-1, K, n // K)
+     if K == 1:
+-        return torch.ops.quip_lib.hadamard(input.contiguous(), 1/(n**0.5)).reshape(X.shape).to(X.dtype)
++        return torch.ops.unisvq_lib.hadamard(input.contiguous(), 1/(n**0.5)).reshape(X.shape).to(X.dtype)
+     if transpose:
+         hadK = hadK.T.contiguous()
+-    input = torch.ops.quip_lib.hadamard(input.contiguous(), 1/(n**0.5))
++    input = torch.ops.unisvq_lib.hadamard(input.contiguous(), 1/(n**0.5))
+     input = hadK.to(input.device).to(input.dtype) @ input
+     return input.to(X.device).to(X.dtype).reshape(X.shape)
+  
+@@ -79,7 +79,7 @@ def is_pow2(n):
+ class HadamardFunction(torch.autograd.Function):
+     @staticmethod
+     def forward(ctx, x, scale):
+-        output = torch.ops.quip_lib.hadamard(x, scale)
++        output = torch.ops.unisvq_lib.hadamard(x, scale)
+         ctx.scale = scale
+         ctx.save_for_backward()
+         return output
+@@ -87,7 +87,7 @@ class HadamardFunction(torch.autograd.Function):
+     @staticmethod
+     def backward(ctx, grad_output):
+         scale = ctx.scale
+-        return torch.ops.quip_lib.hadamard(grad_output, scale), None
++        return torch.ops.unisvq_lib.hadamard(grad_output, scale), None
+ 
+ def matmul_hadU_cuda_blockwise(X):
+     BLOCK_SIZE = 128
+diff --git a/lib/utils/misc.py b/unisvq/utils/misc.py
+similarity index 98%
+rename from lib/utils/misc.py
+rename to unisvq/utils/misc.py
+index 19e7c43..62b5377 100644
+--- a/lib/utils/misc.py
++++ b/unisvq/utils/misc.py
+@@ -23,7 +23,7 @@ class ForkedPdb(pdb.Pdb):
+     """A Pdb subclass that may be used
+     from a forked multiprocessing child
+     use as:
+-    from lib import utils
++    from unisvq import utils
+     utils.ForkedPdb().set_trace()
+     """
+ 
+diff --git a/lib/utils/model_version.py b/unisvq/utils/model_version.py
+similarity index 100%
+rename from lib/utils/model_version.py
+rename to unisvq/utils/model_version.py
+diff --git a/lib/utils/shard_model.py b/unisvq/utils/shard_model.py
+similarity index 95%
+rename from lib/utils/shard_model.py
+rename to unisvq/utils/shard_model.py
+index ea7338e..52279bf 100644
+--- a/lib/utils/shard_model.py
++++ b/unisvq/utils/shard_model.py
+@@ -54,8 +54,8 @@ class ShardTransformer(nn.Module):
+         self.shards = nn.ModuleList([_['shard'] for _ in shards])
+         self.devices = [_['device'] for _ in shards]
+ 
+-        from lib.linear.fused_quantized_linear import FusedQuantizedLinear
+-        from lib.linear.quantized_linear import QuantizedLinear
++        from unisvq.linear.fused_quantized_linear import FusedQuantizedLinear
++        from unisvq.linear.quantized_linear import QuantizedLinear
+         for name, module in self.shards.named_modules():
+             if isinstance(module, QuantizedLinear) or isinstance(
+                     module, FusedQuantizedLinear):
+diff --git a/lib/utils/unsafe_import.py b/unisvq/utils/unsafe_import.py
+similarity index 100%
+rename from lib/utils/unsafe_import.py
+rename to unisvq/utils/unsafe_import.py
