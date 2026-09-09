@@ -6,6 +6,7 @@ import json
 import os
 import shutil
 import tempfile
+from copy import deepcopy
 from operator import attrgetter
 from pathlib import Path
 from typing import Literal, cast
@@ -102,7 +103,7 @@ def _run_rank(
     rank: int,
     config: Config,
     stage: Stage,
-    family: str,
+    model: nn.Module,
     start: int,
     end: int,
     rendezvous: Path,
@@ -112,20 +113,8 @@ def _run_rank(
     with process_group(rank, config.devices, rendezvous) as distributed:
         torch.manual_seed(config.seed)
         torch.cuda.manual_seed(config.seed)
-        dtype = cast(torch.dtype, getattr(torch, config.model_dtype))
-        # Each worker loads independent CPU storage; no model tensors cross spawn.
-        model = (
-            model_loader(family)
-            .from_pretrained(
-                config.model,
-                device_map="cpu",
-                dtype=dtype,
-                local_files_only=True,
-                attn_implementation="sdpa",
-            )
-            .eval()
-            .requires_grad_(False)
-        )
+        # Spawn gives each rank its own module shell, backed by the parent's
+        # shared CPU storage. Never move or train these teacher modules in place.
         layers = language_backbone(model).layers
         data = load_calibration(config)
         if stage == "hessian":
@@ -145,7 +134,7 @@ def _run_rank(
                     placement="cuda",
                 )
                 for index in range(end):
-                    layer = layers[index].to(distributed.device)
+                    layer = deepcopy(layers[index]).to(distributed.device)
                     collectors = (
                         LayerHessianCollectors(layer, include_padding=True, dtype=statistics_dtype)
                         if index >= start
@@ -155,7 +144,6 @@ def _run_rank(
                         layer, device=distributed.device, collectors=collectors
                     )
                     del replay
-                    layer.cpu()
                     if collectors is not None:
                         for name, collector in collectors.collectors.items():
                             matrix, first_moment, count = collector.close_statistics(distributed)
@@ -223,7 +211,8 @@ def _run_rank(
             placement=config.replay_device,
         )
         for index in range(end):
-            layer = layers[index].to(distributed.device).eval()
+            # Only this private work layer is replaced/trained by the quantizer.
+            layer = deepcopy(layers[index]).to(distributed.device).eval()
             # Both boundaries advance through the unmodified teacher before training.
             train_layer = train.forward_original(layer, device=distributed.device)
             validation_layer = validation.forward_original(layer, device=distributed.device)
@@ -280,7 +269,6 @@ def _run_rank(
                 distributed.barrier()
                 del reconstruction
             del train_layer, validation_layer
-            layers[index] = nn.Identity()
             del layer
             utils.clear_cuda_cache()
 
@@ -303,6 +291,22 @@ def _run_workers(config: Config, stage: Stage) -> None:
     if stage == "quantize":
         _initialize_run(config, family, end)
     config.output_dir.mkdir(parents=True, exist_ok=True)
+    torch.set_num_threads(config.num_cpu_threads)
+    # Load once per stage. PyTorch's CPU shared storage survives spawn without
+    # per-rank weight copies; the parent retains it until every worker exits.
+    model = (
+        model_loader(family)
+        .from_pretrained(
+            config.model,
+            device_map="cpu",
+            dtype=cast(torch.dtype, getattr(torch, config.model_dtype)),
+            local_files_only=True,
+            attn_implementation="sdpa",
+        )
+        .eval()
+        .requires_grad_(False)
+        .share_memory()
+    )
     # Staging lives beside the final artifact, on the configured large-data filesystem.
     with tempfile.TemporaryDirectory(prefix=f".{stage}-", dir=config.output_dir) as temporary:
         working = Path(temporary)
@@ -310,7 +314,7 @@ def _run_workers(config: Config, stage: Stage) -> None:
         hessian_dir.mkdir()
         spawn(
             _run_rank,
-            args=(config, stage, family, start, end, working / "store", hessian_dir),
+            args=(config, stage, model, start, end, working / "store", hessian_dir),
             nprocs=len(config.devices),
             join=True,
         )

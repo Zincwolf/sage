@@ -112,8 +112,20 @@ def test_all_projections_reconstruct_and_export_weights(tiny_quip, dtype):
             assert saved["SU"].dtype == saved["SV"].dtype == torch.float32
 
 
-@pytest.mark.skipif(torch.cuda.device_count() < 2, reason="NCCL integration requires two GPUs")
-def test_fp32_hessian_restart_and_hf_export(tiny_quip):
+@pytest.mark.parametrize(
+    "devices",
+    [
+        pytest.param(
+            [0], id="single", marks=pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA")
+        ),
+        pytest.param(
+            [0, 1],
+            id="nccl",
+            marks=pytest.mark.skipif(torch.cuda.device_count() < 2, reason="Two GPUs"),
+        ),
+    ],
+)
+def test_fp32_hessian_restart_and_hf_export(tiny_quip, devices):
     single, hf = tiny_quip
     model = Qwen3ForCausalLM(hf)
     model.save_pretrained(single.model)
@@ -121,7 +133,7 @@ def test_fp32_hessian_restart_and_hf_export(tiny_quip):
     PreTrainedTokenizerFast(tokenizer_object=tokenizer, unk_token="[UNK]").save_pretrained(
         single.model
     )
-    multiple = replace(single, devices=[0, 1], output_dir=single.output_dir.parent / "dp2")
+    multiple = replace(single, devices=devices, output_dir=single.output_dir.parent / "repeat")
     payload = {
         "protocol": single.calibration_recipe(),
         "hessian": torch.randint(0, 128, (5, 16)),

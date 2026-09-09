@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from copy import deepcopy
 from dataclasses import dataclass
 from typing import Any
 
@@ -107,7 +108,9 @@ def capture_replay(
     placement: str = "cuda",
 ) -> ReplayState:
     backbone = language_backbone(model)
-    embedding = backbone.embed_tokens.to(device)
+    # The CPU backbone may be shared across workers. Copy only the modules used
+    # for replay; moving an embedding back to CPU would create a private replica.
+    embedding = deepcopy(backbone.embed_tokens).to(device)
     inputs = torch.empty(
         (*tokens.shape, embedding.embedding_dim),
         dtype=embedding.weight.dtype,
@@ -118,5 +121,8 @@ def capture_replay(
             batch = tokens[start : start + microbatch_size].to(device)
             inputs[start : start + len(batch)].copy_(embedding(batch))
     finally:
-        embedding.cpu()
-    return ReplayState(backbone.config, backbone.rotary_emb, inputs, microbatch_size)
+        del embedding
+    # RoPE can update its buffers during forward, so each replay owns its copy.
+    return ReplayState(
+        backbone.config, deepcopy(backbone.rotary_emb).to(device), inputs, microbatch_size
+    )
