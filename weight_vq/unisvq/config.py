@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Literal
 
 from weight_vq.blockwise.config import BlockwiseConfig
 
@@ -11,6 +12,8 @@ from weight_vq.blockwise.config import BlockwiseConfig
 class UniSVQConfig(BlockwiseConfig):
     hessian_samples: int = 1024
     hessian_sequence_length: int = 4096
+    # Statistics accumulation/storage only; upstream quantizer precision is unchanged.
+    hessian_dtype: Literal["float32", "float64"] = "float32"
     train_samples: int = 896
     validation_samples: int = 128
     sequence_length: int = 4096
@@ -41,8 +44,7 @@ class UniSVQConfig(BlockwiseConfig):
         return {
             **super().hessian_recipe(end),
             "statistic": "centered-token-covariance-and-mean",
-            # Deliberate user-approved departure from upstream FP64 on RTX 6000D.
-            "statistics_dtype": "float32",
+            "statistics_dtype": self.hessian_dtype,
         }
 
     def recipe(self, *, model_family: str, layer_end: int) -> dict[str, object]:

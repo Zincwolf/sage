@@ -73,7 +73,7 @@ def tiny_unisvq(tmp_path):
     return config, hf
 
 
-def test_released_defaults_and_fp32_exception(tiny_unisvq):
+def test_released_defaults_and_hessian_precision(tiny_unisvq):
     config, _ = tiny_unisvq
     defaults = UniSVQConfig(config.model, config.dataset, config.output_dir, [0])
     assert defaults.hessian_samples == defaults.train_samples + defaults.validation_samples == 1024
@@ -84,21 +84,32 @@ def test_released_defaults_and_fp32_exception(tiny_unisvq):
     assert defaults.scale_override == 0.83
     assert defaults.hessian_recipe(1)["statistics_dtype"] == "float32"
     assert "use_fp64" not in {field.name for field in fields(defaults)}
-    assert "statistics_dtype" not in {field.name for field in fields(defaults)}
+    assert defaults.hessian_dtype == "float32"
+    fp64 = replace(defaults, hessian_dtype="float64")
+    assert fp64.hessian_recipe(1)["statistics_dtype"] == "float64"
+    assert fp64.hessian_recipe(1) != defaults.hessian_recipe(1)
+    assert fp64.calibration_recipe() == defaults.calibration_recipe()
+    assert fp64.recipe(model_family="qwen3", layer_end=1)["hessian_dtype"] == "float64"
 
 
 @pytest.mark.parametrize(
     "stage", ["calibration", "hessian", "quantize", "export", "validate", "run"]
 )
-def test_cli(tiny_unisvq, monkeypatch, stage):
+@pytest.mark.parametrize("hessian_dtype", ["float32", "float64"])
+def test_cli(tiny_unisvq, monkeypatch, stage, hessian_dtype):
     config, _ = tiny_unisvq
     path = config.output_dir.parent / "unisvq.yaml"
-    path.write_text("model: /model\ndataset: /rp\noutput_dir: /run\ndevices: [0]\n")
+    path.write_text(
+        "model: /model\ndataset: /rp\noutput_dir: /run\ndevices: [0]\n"
+        f"hessian_dtype: {hessian_dtype}\n"
+    )
     received = []
     assert cli.STAGES[("unisvq", stage)][1] is UniSVQConfig
     monkeypatch.setitem(cli.STAGES, ("unisvq", stage), (received.append, UniSVQConfig))
     cli.main(["unisvq", stage, "--config", str(path)])
-    assert received == [UniSVQConfig(Path("/model"), Path("/rp"), Path("/run"), [0])]
+    assert received == [
+        UniSVQConfig(Path("/model"), Path("/rp"), Path("/run"), [0], hessian_dtype=hessian_dtype)
+    ]
 
 
 def test_truncated_concatenation_matches_upstream_sampling():
@@ -254,9 +265,18 @@ def test_whole_block_reconstruction(tiny_unisvq):
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="Pipeline requires CUDA")
-@pytest.mark.parametrize("family", ["qwen3", "ministral-square", "ministral-rectangular"])
-def test_single_gpu_hessian_restart_export(tiny_unisvq, family):
+@pytest.mark.parametrize(
+    ("family", "hessian_dtype"),
+    [
+        ("qwen3", "float32"),
+        ("qwen3", "float64"),
+        ("ministral-square", "float32"),
+        ("ministral-rectangular", "float32"),
+    ],
+)
+def test_single_gpu_hessian_restart_export(tiny_unisvq, family, hessian_dtype):
     config, hf = tiny_unisvq
+    config = replace(config, hessian_dtype=hessian_dtype)
     if family == "qwen3":
         model = Qwen3ForCausalLM(hf).bfloat16()
         loader = AutoModelForCausalLM
@@ -320,7 +340,10 @@ def test_single_gpu_hessian_restart_export(tiny_unisvq, family):
     torch.save(payload, config.calibration)
     hessian(config)
     statistics = torch.load(config.hessians / "0_qkv.pt", weights_only=True)
-    assert statistics["flatH"].dtype == statistics["mu"].dtype == torch.float32
+    assert statistics["flatH"].dtype == statistics["mu"].dtype == getattr(torch, hessian_dtype)
+    other_dtype = "float64" if hessian_dtype == "float32" else "float32"
+    with pytest.raises(RuntimeError, match="Hessian protocol differs"):
+        hessian(replace(config, hessian_dtype=other_dtype))
     stamp = (config.hessians / "complete.json").stat().st_mtime_ns
     hessian(config)
     assert (config.hessians / "complete.json").stat().st_mtime_ns == stamp

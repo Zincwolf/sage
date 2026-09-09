@@ -130,6 +130,11 @@ def _run_rank(
         data = load_calibration(config)
         if stage == "hessian":
             centered = isinstance(config, (QuIPSharpConfig, UniSVQConfig))
+            statistics_dtype = (
+                cast(torch.dtype, getattr(torch, config.hessian_dtype))
+                if isinstance(config, UniSVQConfig)
+                else torch.float32
+            )
             accumulators: dict[tuple[int, str], tuple[torch.Tensor, torch.Tensor, int]] = {}
             for chunk in data["hessian"].split(config.hessian_chunk_size):
                 state = capture_replay(
@@ -141,9 +146,8 @@ def _run_rank(
                 )
                 for index in range(end):
                     layer = layers[index].to(distributed.device)
-                    # FP32 statistics are deliberate on RTX 6000D, including UniSVQ.
                     collectors = (
-                        LayerHessianCollectors(layer, include_padding=True, dtype=torch.float32)
+                        LayerHessianCollectors(layer, include_padding=True, dtype=statistics_dtype)
                         if index >= start
                         else None
                     )

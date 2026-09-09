@@ -4,6 +4,8 @@ dataset: /path/to/RedPajama/Arrows
 output_dir: /path/to/outputs/unisvq/ministral3-8b
 devices: [0]
 model_dtype: bfloat16
+# float32 or float64 statistics; independent of model/quantizer precision.
+hessian_dtype: float32
 replay_device: cpu
 hessian_chunk_size: 128
 forward_microbatch_size: 1
