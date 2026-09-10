@@ -11,7 +11,9 @@ import torch
 from torch import nn
 
 from weight_vq import utils
-from weight_vq.blockwise.artifacts import PROJECTIONS
+from weight_vq.blockwise.artifacts import projections
+from weight_vq.blockwise.hessian import load_quantization_hessian
+from weight_vq.blockwise.models import LinearExperts
 from weight_vq.blockwise.reconstruction import DistributedReconstruction
 from weight_vq.quip_sharp.config import QuIPSharpConfig
 
@@ -41,26 +43,24 @@ def quantize_layer(
     )
     cb = codebook.get_codebook(config.codebook)
     saved_projections = {}
-    for attribute, short, hessian_name, _parallel in PROJECTIONS:
+    experts = getattr(layer.mlp, "experts", None)
+    expert_count = len(experts) if isinstance(experts, LinearExperts) else 0
+    specs = projections(expert_count)
+    for position, (attribute, short, hessian_name, _parallel) in enumerate(specs):
         linear = attrgetter(attribute)(layer)
         with torch.no_grad():
             # Match upstream quantize_linear without its per-file restart/write behavior:
             # an incomplete block must restart from the teacher on every rank.
-            statistics = torch.load(
-                config.hessians / f"{index}_{hessian_name}.pt",
-                map_location="cpu",
-                weights_only=True,
+            hessian, metadata = load_quantization_hessian(
+                config.hessians / f"{index}_{hessian_name}.pt", config.min_expert_coverage
             )
-            hessian = quip_utils.flat_to_sym(statistics["flatH"], statistics["n"])
-            mu = statistics["mu"]
-            hessian.add_(mu[:, None] * mu[None, :])
-            hessian = quip_utils.regularize_H(hessian, statistics["n"], config.sigma_reg)
+            hessian = quip_utils.regularize_H(hessian, hessian.shape[0], config.sigma_reg)
             dtype = torch.float64 if config.use_fp64 else torch.float32
             weight = linear.weight.detach().to(device="cpu", dtype=dtype)
             scale = weight.square().mean().sqrt()
             _decoded, saved = quip.quantize(hessian, weight / scale, 0, cb, args, str(device))
             saved["SV"] *= scale
-            saved.update(fused=False, shapes=[weight.shape], scales=[1.0])
+            saved.update(fused=False, shapes=[weight.shape], scales=[1.0], **metadata)
             quantized = QuantizedLinear(
                 linear.in_features,
                 linear.out_features,
@@ -78,17 +78,24 @@ def quantize_layer(
             if linear.bias is not None:
                 quantized.bias = nn.Parameter(linear.bias.detach().float().cpu().clone())
             saved_projections[short] = saved
-            del statistics, hessian, mu, weight, _decoded
+            del hessian, weight, _decoded
         quantized.SU = nn.Parameter(quantized.get_buffer("SU").float())
         quantized.SV = nn.Parameter(quantized.get_buffer("SV").float())
         parent, name = attribute.rsplit(".", 1)
         setattr(attrgetter(parent)(layer), name, quantized)
         del linear
-        # Paper Algorithm FT reconstructs after every projection, including the last.
+        # Dense projections retain Algorithm FT; MoE reconstructs after each
+        # complete gate/up/down group rather than after every expert.
+        if (
+            attribute.startswith("mlp.experts.")
+            and position + 1 < len(specs)
+            and attribute.rsplit(".", 1)[1] == specs[position + 1][0].rsplit(".", 1)[1]
+        ):
+            continue
         reconstruction(layer, f"{index}_{short}", orig_dtype)
 
     if reconstruction.distributed.is_primary:
-        for attribute, short, *_ in PROJECTIONS:
+        for attribute, short, *_ in specs:
             quantized = attrgetter(attribute)(layer)
             saved = saved_projections[short]
             saved["SU"] = quantized.SU.detach().cpu().clone()

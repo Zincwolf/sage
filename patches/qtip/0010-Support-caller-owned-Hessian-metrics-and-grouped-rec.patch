@@ -1,0 +1,72 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Zincwolf <zincwolf@outlook.com>
+Date: Thu, 10 Sep 2026 09:14:28 +0800
+Subject: [PATCH] Support caller-owned Hessian metrics and grouped
+ reconstruction
+
+---
+ lib/algo/finetune.py | 30 ++++++++++++++++++++++--------
+ 1 file changed, 22 insertions(+), 8 deletions(-)
+
+diff --git a/lib/algo/finetune.py b/lib/algo/finetune.py
+index 25e82a0..fec8efc 100644
+--- a/lib/algo/finetune.py
++++ b/lib/algo/finetune.py
+@@ -133,7 +133,9 @@ def quantize_finetune_decoder_layer(mixed_layer, quant_order, idx, cb, args,
+                                     reconstruction_callback=None,
+                                     resume_state=None,
+                                     progress_callback=None,
+-                                    write_checkpoints=True):
++                                    write_checkpoints=True,
++                                    hessian_loader=None,
++                                    reconstruction_groups=None):
+     torch.manual_seed(getattr(args, 'seed', 0) + idx)
+     torch.set_num_threads(args.num_cpu_threads)
+     torch.set_grad_enabled(False)
+@@ -263,13 +265,17 @@ def quantize_finetune_decoder_layer(mixed_layer, quant_order, idx, cb, args,
+         SV = (torch.randn(m, device=device).sign() + 1e-5).sign().to(dtype_)
+ 
+         in_hess_path = f'{args.hessians}/{idx}_{in_hess_name}.pt'
+-        H_data = torch.load(in_hess_path, map_location=torch.device('cpu'))
+-        HR = utils.flat_to_sym(H_data['flatH'], H_data['n'])
+-        if 'mu' in H_data:
+-            mu = H_data['mu']
+-            HR += mu[None, :] * mu[:, None]
+-            del mu
+-        del H_data
++        metric_metadata = {}
++        if hessian_loader is None:
++            H_data = torch.load(in_hess_path, map_location=torch.device('cpu'))
++            HR = utils.flat_to_sym(H_data['flatH'], H_data['n'])
++            if 'mu' in H_data:
++                mu = H_data['mu']
++                HR += mu[None, :] * mu[:, None]
++                del mu
++            del H_data
++        else:
++            HR, metric_metadata = hessian_loader(in_hess_path)
+ 
+         HR = utils.regularize_H(HR, args.sigma_reg)
+ 
+@@ -391,6 +397,7 @@ def quantize_finetune_decoder_layer(mixed_layer, quant_order, idx, cb, args,
+             rcp_int = 1 if rcp == 'row' else 2
+ 
+         payload = {
++            **metric_metadata,
+             'trellis': packed.cpu(),
+             'SU': SU.to(orig_dtype).cpu(),
+             'SV': SV.to(orig_dtype).cpu(),
+@@ -426,6 +433,13 @@ def quantize_finetune_decoder_layer(mixed_layer, quant_order, idx, cb, args,
+             attrgetter('.'.join(split_attr[:-1]))(mixed_layer), split_attr[-1],
+             q_linear)
+ 
++        # Caller may reconstruct once after a group of expert projections.
++        if (reconstruction_groups is not None
++                and quant_i + 1 < len(quant_order)
++                and reconstruction_groups[quant_i] == reconstruction_groups[quant_i + 1]):
++            cb = cb.cpu()
++            continue
++
+         with torch.enable_grad():
+             if reconstruction_callback is None:
+                 finetune_decoder_layer(

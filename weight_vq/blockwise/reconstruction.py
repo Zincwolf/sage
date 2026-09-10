@@ -11,6 +11,7 @@ from torch import nn
 from weight_vq import utils
 from weight_vq.blockwise.config import BlockwiseConfig
 from weight_vq.blockwise.distributed import DistributedContext
+from weight_vq.blockwise.models import LinearExperts
 from weight_vq.blockwise.replay import LayerReplay
 
 
@@ -43,7 +44,21 @@ class DistributedReconstruction:
                 device_type=device.type, dtype=orig_dtype, enabled=orig_dtype != torch.float32
             ),
         ):
-            self.train.state.forward(layer, self.train.inputs[:1].to(device))
+            experts = getattr(layer.mlp, "experts", None)
+            if isinstance(experts, LinearExperts):
+                # Routing may never visit an expert. Materialize every expert before
+                # snapshots/optimizer creation so state layout is identical on all ranks.
+                hidden = torch.zeros(
+                    1, self.train.inputs.shape[-1], device=device, dtype=orig_dtype
+                )
+                for expert in experts:
+                    expert(hidden)
+            source = self.train.inputs[:1].to(device)
+            if not len(source):
+                source = torch.zeros(
+                    (1, *self.train.inputs.shape[1:]), device=device, dtype=orig_dtype
+                )
+            self.train.state.forward(layer, source)
 
         ordinary, susv = [], []
         for parameter_name, parameter in layer.named_parameters():

@@ -15,6 +15,8 @@ class QuIPSharpConfig(BlockwiseConfig):
     scale_override: float = 0.9
     quip_tune_iters: int = 10
     use_fp64: bool = False
+    # Fraction of original calibration tokens needed for an expert Hessian.
+    min_expert_coverage: float = 0.0
 
     # This adapter implements the paper's W2 Hadamard E8P path, without E2E/LoRA.
     codebook = "E8P12"

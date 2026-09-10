@@ -20,6 +20,8 @@ class QTIPConfig(BlockwiseConfig):
     scale_override: float = 0.9
     use_fp64: bool = False
     train_lut: bool = True
+    # Fraction of original calibration tokens needed for an expert Hessian.
+    min_expert_coverage: float = 0.0
 
     # The upstream interface also supports packed TP inference, outside dense QDQ.
     packed_inference_kernel = False

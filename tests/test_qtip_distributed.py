@@ -22,6 +22,21 @@ def _collective_worker(rank: int, rendezvous: str, output: str) -> None:
 
         linear.weight.grad = torch.tensor([[float(rank + 1)]])
         distributed.sync_gradients(linear)
+        experts = nn.ParameterList([nn.Parameter(torch.ones(1)), nn.Parameter(torch.ones(1))])
+        optimizer = torch.optim.Adam(experts.parameters(), lr=0.01)
+        # Seed Adam momentum for both experts, then leave the second globally unused.
+        for parameter in experts:
+            parameter.grad = torch.ones_like(parameter)
+        optimizer.step()
+        untouched = experts[1].detach().clone()
+        optimizer.zero_grad(set_to_none=True)
+        if rank == 0:
+            experts[0].grad = torch.ones_like(experts[0])
+        distributed.sync_gradients(experts)
+        assert experts[1].grad is None
+        torch.testing.assert_close(experts[0].grad, torch.ones(1))
+        optimizer.step()
+        torch.testing.assert_close(experts[1], untouched, atol=0, rtol=0)
         torch.save(
             {"hessian": hessian, "gradient": linear.weight.grad}, Path(output, f"rank-{rank}.pt")
         )

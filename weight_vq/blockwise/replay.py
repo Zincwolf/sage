@@ -91,7 +91,8 @@ class LayerReplay:
     ) -> tuple[torch.Tensor, int]:
         total = torch.zeros((), device=device, dtype=torch.float64)
         count = 0
-        for indices in torch.arange(len(self.inputs)).split(microbatch_size):
+        for start in range(0, len(self.inputs), microbatch_size):
+            indices = torch.arange(start, min(start + microbatch_size, len(self.inputs)))
             error, elements = self.loss_parts(layer, indices, device)
             total += error
             count += elements

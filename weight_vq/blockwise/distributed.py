@@ -34,9 +34,17 @@ class DistributedContext:
     def sync_gradients(self, module: nn.Module) -> None:
         if self.world_size == 1:
             return
-        for parameter in module.parameters():
-            if parameter.requires_grad:
-                # A shuffled global batch can contain no samples owned by a rank.
+        parameters = [parameter for parameter in module.parameters() if parameter.requires_grad]
+        present = torch.tensor(
+            [parameter.grad is not None for parameter in parameters],
+            device=self.device,
+            dtype=torch.int32,
+        )
+        self.sum_(present)
+        for parameter, used in zip(parameters, present.tolist(), strict=True):
+            # Globally unused experts must keep grad=None: Adam should skip them,
+            # including momentum updates, just as in the single-rank global batch.
+            if used:
                 if parameter.grad is None:
                     parameter.grad = torch.zeros_like(parameter)
                 dist.all_reduce(parameter.grad, op=dist.ReduceOp.SUM)

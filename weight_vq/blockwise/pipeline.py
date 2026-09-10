@@ -7,7 +7,7 @@ import os
 import shutil
 import tempfile
 from copy import deepcopy
-from operator import attrgetter
+from functools import partial
 from pathlib import Path
 from typing import Literal, cast
 
@@ -26,16 +26,21 @@ from transformers import (
 
 from weight_vq import utils
 from weight_vq.blockwise.artifacts import (
-    PROJECTIONS,
     atomic_write_completion,
     hessian_complete,
     layer_complete,
+    projections,
     quant_order,
 )
 from weight_vq.blockwise.calibration import calibration, load_calibration
 from weight_vq.blockwise.distributed import process_group
-from weight_vq.blockwise.hessian import LayerHessianCollectors
-from weight_vq.blockwise.models import language_backbone
+from weight_vq.blockwise.hessian import LayerHessianCollectors, load_quantization_hessian
+from weight_vq.blockwise.models import (
+    language_backbone,
+    layer_expert_count,
+    projection_weight,
+    split_work_experts,
+)
 from weight_vq.blockwise.reconstruction import DistributedReconstruction
 from weight_vq.blockwise.replay import capture_replay
 from weight_vq.qtip.artifacts import reconstruct_dense_weight
@@ -54,12 +59,12 @@ Stage = Literal["hessian", "quantize"]
 
 def _model_contract(model: Path) -> tuple[str, int]:
     config = AutoConfig.from_pretrained(model, local_files_only=True)
-    if config.model_type == "qwen3":
-        return "qwen3", int(config.num_hidden_layers)
+    if config.model_type in ("qwen3", "qwen3_moe"):
+        return config.model_type, int(config.num_hidden_layers)
     if config.model_type == "mistral3" and config.text_config.model_type == "ministral3":
         return "mistral3", int(config.text_config.num_hidden_layers)
     raise ValueError(
-        f"Blockwise pipeline supports qwen3 and Ministral-3, got {config.model_type!r}"
+        f"Blockwise pipeline supports qwen3, qwen3_moe and Ministral-3, got {config.model_type!r}"
     )
 
 
@@ -124,8 +129,12 @@ def _run_rank(
                 if isinstance(config, UniSVQConfig)
                 else torch.float32
             )
-            accumulators: dict[tuple[int, str], tuple[torch.Tensor, torch.Tensor, int]] = {}
-            for chunk in data["hessian"].split(config.hessian_chunk_size):
+            # Raw per-layer accumulators live on disk between calibration chunks.
+            # Only one layer's GPU collectors and one projection's CPU merge
+            # (current plus previous matrix) are resident.
+            for chunk_start in range(0, len(data["hessian"]), config.hessian_chunk_size):
+                chunk = data["hessian"][chunk_start : chunk_start + config.hessian_chunk_size]
+                last_chunk = chunk_start + len(chunk) == len(data["hessian"])
                 state = capture_replay(
                     model,
                     chunk[rank :: distributed.world_size],
@@ -135,6 +144,7 @@ def _run_rank(
                 )
                 for index in range(end):
                     layer = deepcopy(layers[index]).to(distributed.device)
+                    split_work_experts(layer)
                     collectors = (
                         LayerHessianCollectors(layer, include_padding=True, dtype=statistics_dtype)
                         if index >= start
@@ -148,37 +158,57 @@ def _run_rank(
                         for name, collector in collectors.collectors.items():
                             matrix, first_moment, count = collector.close_statistics(distributed)
                             if distributed.is_primary:
-                                key = (index, name)
-                                if key in accumulators:
-                                    total, first_total, tokens = accumulators[key]
-                                    total.add_(matrix)
-                                    first_total.add_(first_moment)
-                                    accumulators[key] = total, first_total, tokens + count
+                                path = hessian_dir / f"{index}_{name}.pt"
+                                if chunk_start:
+                                    previous = torch.load(
+                                        path, weights_only=True, map_location="cpu"
+                                    )
+                                    matrix.add_(previous["matrix"])
+                                    first_moment.add_(previous["first_moment"])
+                                    count += previous["ct"]
+                                    del previous
+                                if last_chunk:
+                                    # Unvisited experts retain zero statistics; the quantizer
+                                    # chooses the weight-only metric after global aggregation.
+                                    if count:
+                                        matrix.div_(count)
+                                        if centered:
+                                            first_moment.div_(count)
+                                            matrix.sub_(
+                                                first_moment[:, None] * first_moment[None, :]
+                                            )
+                                    flat = torch.cat([row[: i + 1] for i, row in enumerate(matrix)])
+                                    utils.atomic_torch_save(
+                                        {
+                                            "flatH": flat,
+                                            "n": matrix.shape[0],
+                                            "ct": count,
+                                            "position_mask": "all",
+                                            **({"mu": first_moment} if centered else {}),
+                                            **(
+                                                {"total_tokens": data["hessian"].numel()}
+                                                if name.startswith("expert")
+                                                else {}
+                                            ),
+                                        },
+                                        path,
+                                    )
+                                    del flat
                                 else:
-                                    accumulators[key] = matrix, first_moment, count
+                                    utils.atomic_torch_save(
+                                        {
+                                            "matrix": matrix,
+                                            "first_moment": first_moment,
+                                            "ct": count,
+                                        },
+                                        path,
+                                    )
                             del matrix, first_moment
                     del collectors, layer
                     utils.clear_cuda_cache()
                 del state
                 utils.clear_cuda_cache()
             if distributed.is_primary:
-                for (index, name), (matrix, first_moment, count) in accumulators.items():
-                    matrix.div_(count)
-                    if centered:
-                        first_moment.div_(count)
-                        matrix.sub_(first_moment[:, None] * first_moment[None, :])
-                    # Avoid two quadratic int64 index arrays for the packed triangle.
-                    flat = torch.cat([row[: i + 1] for i, row in enumerate(matrix)])
-                    utils.atomic_torch_save(
-                        {
-                            "flatH": flat,
-                            "n": matrix.shape[0],
-                            "ct": count,
-                            "position_mask": "all",
-                            **({"mu": first_moment} if centered else {}),
-                        },
-                        hessian_dir / f"{index}_{name}.pt",
-                    )
                 utils.atomic_write_text(
                     hessian_dir / "complete.json",
                     json.dumps(config.hessian_recipe(end), indent=2) + "\n",
@@ -216,7 +246,10 @@ def _run_rank(
             # Both boundaries advance through the unmodified teacher before training.
             train_layer = train.forward_original(layer, device=distributed.device)
             validation_layer = validation.forward_original(layer, device=distributed.device)
-            if index >= start and not layer_complete(index, config.checkpoints):
+            expert_count = layer_expert_count(model.config, index)
+            specs = projections(expert_count)
+            if index >= start and not layer_complete(index, config.checkpoints, expert_count):
+                split_work_experts(layer)
                 if distributed.is_primary:
                     (config.checkpoints / f"{index}.complete").unlink(missing_ok=True)
                 layer.requires_grad_(True)
@@ -231,7 +264,7 @@ def _run_rank(
                 if isinstance(config, QTIPConfig):
                     finetune.quantize_finetune_decoder_layer(
                         layer,
-                        quant_order(),
+                        quant_order(expert_count),
                         index,
                         codebook,
                         config,
@@ -240,6 +273,20 @@ def _run_rank(
                         None,
                         reconstruction_callback=reconstruction,
                         write_checkpoints=distributed.is_primary,
+                        hessian_loader=partial(
+                            load_quantization_hessian,
+                            min_expert_coverage=config.min_expert_coverage,
+                        ),
+                        reconstruction_groups=(
+                            [
+                                short
+                                if not attribute.startswith("mlp.experts.")
+                                else attribute.rsplit(".", 1)[1]
+                                for attribute, short, *_ in specs
+                            ]
+                            if expert_count
+                            else None
+                        ),
                     )
                 elif isinstance(config, UniSVQConfig):
                     quantize_unisvq_layer(
@@ -248,7 +295,7 @@ def _run_rank(
                 else:
                     quantize_layer(layer, index, config, reconstruction)
                 if distributed.is_primary:
-                    prefixes = tuple(f"{attribute}." for attribute, *_ in PROJECTIONS)
+                    prefixes = tuple(f"{attribute}." for attribute, *_ in specs)
                     auxiliary = {
                         name: value.detach().cpu().clone()
                         for name, value in layer.state_dict().items()
@@ -265,7 +312,30 @@ def _run_rank(
                             or name.endswith(".bias")
                         }
                     utils.atomic_torch_save(auxiliary, config.checkpoints / f"{index}.auxiliary.pt")
-                    atomic_write_completion(index, config.checkpoints)
+                    if expert_count:
+                        coverage = {}
+                        for expert in range(expert_count):
+                            saved = torch.load(
+                                config.checkpoints / f"{index}_expert{expert}_gate.pt",
+                                map_location="cpu",
+                                weights_only=True,
+                            )
+                            coverage[str(expert)] = {
+                                key: saved[key]
+                                for key in (
+                                    "observed_tokens",
+                                    "total_tokens",
+                                    "coverage",
+                                    "fallback",
+                                    "metric",
+                                )
+                            }
+                            del saved
+                        utils.atomic_write_text(
+                            config.checkpoints / f"{index}.coverage.json",
+                            json.dumps(coverage, indent=2) + "\n",
+                        )
+                    atomic_write_completion(index, config.checkpoints, expert_count)
                 distributed.barrier()
                 del reconstruction
             del train_layer, validation_layer
@@ -275,13 +345,19 @@ def _run_rank(
 
 def _run_workers(config: Config, stage: Stage) -> None:
     family, model_layers = _model_contract(config.model)
+    hf_config = AutoConfig.from_pretrained(config.model, local_files_only=True)
+    if family == "qwen3_moe" and isinstance(config, UniSVQConfig):
+        raise ValueError("MoE quantization is supported only by QTIP and QuIP#")
     start, end = layer_range(config, model_layers)
     load_calibration(config)
     marker = config.hessians / "complete.json"
     if marker.exists():
         if json.loads(marker.read_text()) != config.hessian_recipe(end):
             raise RuntimeError("Hessian protocol differs; use a new output_dir")
-        if all(hessian_complete(index, config.hessians) for index in range(start, end)):
+        if all(
+            hessian_complete(index, config.hessians, layer_expert_count(hf_config, index))
+            for index in range(start, end)
+        ):
             if stage == "hessian":
                 return
         else:
@@ -322,7 +398,9 @@ def _run_workers(config: Config, stage: Stage) -> None:
             os.replace(hessian_dir, config.hessians)
     if stage == "quantize":
         missing = [
-            index for index in range(start, end) if not layer_complete(index, config.checkpoints)
+            index
+            for index in range(start, end)
+            if not layer_complete(index, config.checkpoints, layer_expert_count(hf_config, index))
         ]
         if missing:
             raise RuntimeError(f"quantize did not complete layers: {missing}")
@@ -338,6 +416,7 @@ def quantize(config: Config) -> None:
 
 def export(config: Config) -> None:
     family, model_layers = _model_contract(config.model)
+    hf_config = AutoConfig.from_pretrained(config.model, local_files_only=True)
     start, end = layer_range(config, model_layers)
     method = {QTIPConfig: "qtip", QuIPSharpConfig: "quip_sharp", UniSVQConfig: "unisvq"}[
         type(config)
@@ -347,7 +426,9 @@ def export(config: Config) -> None:
     if recipe != config.recipe(model_family=family, layer_end=end):
         raise RuntimeError("export configuration differs from checkpoint recipe")
     missing = [
-        index for index in range(start, end) if not layer_complete(index, config.checkpoints)
+        index
+        for index in range(start, end)
+        if not layer_complete(index, config.checkpoints, layer_expert_count(hf_config, index))
     ]
     if missing:
         raise RuntimeError(f"checkpoints are incomplete for layers: {missing}")
@@ -362,13 +443,13 @@ def export(config: Config) -> None:
     with torch.no_grad():
         for index in range(start, end):
             layer = layers[index]
-            for attribute, short, *_ in PROJECTIONS:
+            for attribute, short, *_ in projections(layer_expert_count(hf_config, index)):
                 saved = torch.load(
                     config.checkpoints / f"{index}_{short}.pt",
                     map_location="cpu",
                     weights_only=True,
                 )
-                linear = attrgetter(attribute)(layer)
+                target = projection_weight(layer, attribute)
                 if isinstance(config, QTIPConfig):
                     weight = reconstruct_dense_weight(saved, recipe)
                 elif isinstance(config, UniSVQConfig):
@@ -379,7 +460,7 @@ def export(config: Config) -> None:
                     weight = reconstruct_quip_weight(
                         saved, torch.device(f"cuda:{config.devices[0]}")
                     )
-                linear.weight.copy_(weight.to(linear.weight.dtype))
+                target.copy_(weight.to(target.dtype))
                 del weight
             auxiliary = torch.load(
                 config.checkpoints / f"{index}.auxiliary.pt", map_location="cpu", weights_only=True
@@ -400,6 +481,15 @@ def export(config: Config) -> None:
                 staging
             )
         shutil.copy2(config.checkpoints / recipe_name, staging / recipe_name)
+        if family == "qwen3_moe":
+            coverage = {
+                str(index): json.loads((config.checkpoints / f"{index}.coverage.json").read_text())
+                for index in range(start, end)
+                if layer_expert_count(hf_config, index)
+            }
+            utils.atomic_write_text(
+                staging / "moe_coverage.json", json.dumps(coverage, indent=2) + "\n"
+            )
         os.replace(staging, config.exported_model)
 
 
@@ -407,14 +497,31 @@ def validate(config: Config) -> None:
     family, model_layers = _model_contract(config.model)
     start, end = layer_range(config, model_layers)
     prefix = "model.language_model" if family == "mistral3" else "model"
+    if family == "qwen3_moe":
+        coverage = json.loads((config.exported_model / "moe_coverage.json").read_text())
+        print("layer,experts,zero_coverage,fallback,coverage_min,coverage_median,coverage_max")
+        for index, experts in coverage.items():
+            values = torch.tensor([expert["coverage"] for expert in experts.values()])
+            print(
+                f"{index},{len(experts)},"
+                f"{sum(expert['observed_tokens'] == 0 for expert in experts.values())},"
+                f"{sum(expert['fallback'] for expert in experts.values())},"
+                f"{values.min().item():.6g},{values.quantile(0.5).item():.6g},"
+                f"{values.max().item():.6g}"
+            )
     utils.validate_dense_model(
         config.exported_model,
         model_loader=model_loader(family),
+        # Dense QDQ retains all 30B weights; validate on CPU instead of loading
+        # the entire exported MoE onto a single GPU.
+        device="cpu" if family == "qwen3_moe" else config.devices[0],
         weights=lambda model: (
-            (name, model.get_parameter(f"{name}.weight"))
+            (
+                f"{prefix}.layers.{index}.{attribute}",
+                projection_weight(language_backbone(model).layers[index], attribute),
+            )
             for index in range(start, end)
-            for attribute, *_ in PROJECTIONS
-            for name in (f"{prefix}.layers.{index}.{attribute}",)
+            for attribute, *_ in projections(layer_expert_count(model.config, index))
         ),
     )
 

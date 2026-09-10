@@ -20,7 +20,9 @@ def had() -> ModuleType:
     return matmul_had
 
 
-@pytest.mark.parametrize("width,factor", [(2560, 20), (5120, 20), (4096, 1), (9728, -512)])
+@pytest.mark.parametrize(
+    "width,factor", [(768, 12), (2560, 20), (5120, 20), (4096, 1), (9728, -512)]
+)
 def test_factor_selection(had: ModuleType, width: int, factor: int) -> None:
     matrix, actual = had.get_hadK(width)
     assert actual == factor
@@ -55,7 +57,7 @@ def test_reference_block_transform(had: ModuleType, dtype: torch.dtype, device: 
     torch.testing.assert_close(x, original, rtol=0, atol=0)
 
 
-@pytest.mark.parametrize("width", [2560, 5120, 9728])
+@pytest.mark.parametrize("width", [768, 2560, 5120, 9728])
 def test_cuda_transform_matches_reference_and_qtip(had: ModuleType, width: int) -> None:
     if not torch.cuda.is_available():
         pytest.skip("CUDA unavailable")
@@ -71,7 +73,9 @@ def test_cuda_transform_matches_reference_and_qtip(had: ModuleType, width: int) 
         torch.testing.assert_close(actual, qtip_had.matmul_hadU(x), rtol=0, atol=0)
 
 
-@pytest.mark.parametrize("in_features,out_features", [(9728, 16), (64, 9728)])
+@pytest.mark.parametrize(
+    "in_features,out_features", [(9728, 16), (64, 9728), (2048, 768), (768, 2048)]
+)
 def test_training_cache_with_implicit_factor(
     had: ModuleType, in_features: int, out_features: int
 ) -> None:

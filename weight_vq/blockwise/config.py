@@ -81,6 +81,16 @@ class BlockwiseConfig:
 
     def recipe(self, *, model_family: str, layer_end: int) -> dict[str, object]:
         payload = asdict(self)
+        if model_family == "qwen3_moe":
+            payload["moe_protocol"] = {
+                "coverage_denominator": "original-calibration-tokens-including-padding",
+                "fallback": "identity-metric-with-method-codebook",
+                "reconstruction": "attention-per-projection-experts-gate-up-down-groups",
+                "router": "unquantized",
+            }
+        else:
+            # The MoE-only parameter does not invalidate existing dense checkpoints.
+            payload.pop("min_expert_coverage", None)
         for key in ("model", "dataset"):
             payload[key] = str(getattr(self, key).resolve())
         for key in (
