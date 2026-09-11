@@ -24,6 +24,8 @@ from weight_vq.qtip.artifacts import reconstruct_dense_weight as reconstruct_qti
 from weight_vq.qtip.config import QTIPConfig
 from weight_vq.quip_sharp.config import QuIPSharpConfig
 from weight_vq.quip_sharp.quantization import reconstruct_dense_weight as reconstruct_quip
+from weight_vq.unisvq.config import UniSVQConfig
+from weight_vq.unisvq.quantization import reconstruct_dense_weight as reconstruct_unisvq
 
 
 @pytest.fixture
@@ -37,7 +39,8 @@ def moe_model():
         moe_intermediate_size=128,
         num_hidden_layers=1,
         num_attention_heads=4,
-        num_key_value_heads=2,
+        # Keep every projection axis compatible with UniSVQ's 128-wide blocks.
+        num_key_value_heads=4,
         num_experts=4,
         num_experts_per_tok=1,
     )
@@ -136,7 +139,7 @@ def test_routed_statistics_and_weight_only_metric(moe_model, tmp_path):
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="real quantizers require CUDA")
-@pytest.mark.parametrize("method", ["qtip", "quip"])
+@pytest.mark.parametrize("method", ["qtip", "quip", "unisvq"])
 @pytest.mark.parametrize("devices", [[0], [0, 1, 2, 3]], ids=["single", "four-gpu"])
 def test_moe_pipeline_sparse_restart_and_native_export(moe_model, tmp_path, method, devices):
     if torch.cuda.device_count() < len(devices):
@@ -148,7 +151,7 @@ def test_moe_pipeline_sparse_restart_and_native_export(moe_model, tmp_path, meth
         router[1].copy_(-router[0])
         router[2].copy_(router[0] * 0.5)
         router[3].copy_(router[0] * -0.5)
-    config_class = QTIPConfig if method == "qtip" else QuIPSharpConfig
+    config_class = {"qtip": QTIPConfig, "quip": QuIPSharpConfig, "unisvq": UniSVQConfig}[method]
     config = config_class(
         model=tmp_path / "model",
         dataset=tmp_path / "unused",
@@ -159,11 +162,13 @@ def test_moe_pipeline_sparse_restart_and_native_export(moe_model, tmp_path, meth
         hessian_samples=5,
         hessian_sequence_length=8,
         hessian_chunk_size=2,
-        train_samples=4,
+        # UniSVQ also exercises a rank with no training samples and a partial
+        # accumulation window across its two logical batches.
+        train_samples=3 if method == "unisvq" else 4,
         validation_samples=2,
         sequence_length=8,
         reconstruction_epochs=1,
-        batch_size=4,
+        batch_size=2 if method == "unisvq" else 4,
         min_expert_coverage=0.6,
         gradient_checkpointing=True,
     )
@@ -180,7 +185,7 @@ def test_moe_pipeline_sparse_restart_and_native_export(moe_model, tmp_path, meth
     payload = {
         "protocol": config.calibration_recipe(),
         "hessian": torch.randint(1, 32, (5, 8)),
-        "train": torch.randint(1, 32, (4, 8)),
+        "train": torch.randint(1, 32, (config.train_samples, 8)),
         "validation": torch.randint(1, 32, (2, 8)),
     }
     torch.save(payload, config.calibration)
@@ -200,7 +205,7 @@ def test_moe_pipeline_sparse_restart_and_native_export(moe_model, tmp_path, meth
         assert saved["ct"] == count
         if count:
             matrix /= count
-            if method == "quip":
+            if method in ("quip", "unisvq"):
                 first /= count
                 matrix -= first[:, None] * first[None, :]
         flat = torch.cat([row[: i + 1] for i, row in enumerate(matrix)])
@@ -237,15 +242,33 @@ def test_moe_pipeline_sparse_restart_and_native_export(moe_model, tmp_path, meth
     assert dense.model.layers[0].mlp.experts.gate_up_proj.shape == (4, 256, 128)
     for attribute, short, *_ in projections(4):
         saved = torch.load(config.checkpoints / f"0_{short}.pt", weights_only=True)
-        expected = (
-            reconstruct_qtip(saved, config.recipe(model_family="qwen3_moe", layer_end=1))
-            if isinstance(config, QTIPConfig)
-            else reconstruct_quip(saved, torch.device("cuda:0"))
-        )
+        if isinstance(config, QTIPConfig):
+            expected = reconstruct_qtip(saved, config.recipe(model_family="qwen3_moe", layer_end=1))
+        elif isinstance(config, UniSVQConfig):
+            expected = reconstruct_unisvq(saved, torch.device("cuda:0"))
+            assert saved["SU"].dtype == saved["SV"].dtype == torch.float16
+        else:
+            expected = reconstruct_quip(saved, torch.device("cuda:0"))
         torch.testing.assert_close(projection_weight(dense.model.layers[0], attribute), expected)
         if short.startswith("expert"):
             assert saved["fallback"] == (
                 saved["observed_tokens"] == 0 or saved["coverage"] < config.min_expert_coverage
+            )
+    if isinstance(config, UniSVQConfig):
+        auxiliary = torch.load(config.checkpoints / "0.auxiliary.pt", weights_only=True)
+        assert set(auxiliary) == {
+            "input_layernorm.weight",
+            "post_attention_layernorm.weight",
+            "mlp.gate.weight",
+        }
+        for name, value in auxiliary.items():
+            torch.testing.assert_close(dense.model.layers[0].get_parameter(name), value)
+        for name in ("q_norm", "k_norm"):
+            torch.testing.assert_close(
+                dense.model.layers[0].get_parameter(f"self_attn.{name}.weight"),
+                moe_model.model.layers[0].get_parameter(f"self_attn.{name}.weight"),
+                atol=0,
+                rtol=0,
             )
     assert (config.exported_model / "moe_coverage.json").is_file()
     assert torch.isfinite(dense(payload["validation"]).logits).all()

@@ -24,14 +24,16 @@ from transformers import (
     PreTrainedTokenizerFast,
     Qwen3Config,
     Qwen3ForCausalLM,
+    Qwen3MoeConfig,
+    Qwen3MoeForCausalLM,
 )
 
 from weight_vq import cli
-from weight_vq.blockwise.artifacts import PROJECTIONS
+from weight_vq.blockwise.artifacts import projections
 from weight_vq.blockwise.calibration import sample_documents
 from weight_vq.blockwise.distributed import DistributedContext
 from weight_vq.blockwise.hessian import LayerHessianCollectors
-from weight_vq.blockwise.models import language_backbone
+from weight_vq.blockwise.models import language_backbone, split_work_experts
 from weight_vq.blockwise.pipeline import export, hessian, quantize
 from weight_vq.blockwise.replay import capture_replay
 from weight_vq.unisvq.config import UniSVQConfig
@@ -90,6 +92,13 @@ def test_released_defaults_and_hessian_precision(tiny_unisvq):
     assert fp64.hessian_recipe(1) != defaults.hessian_recipe(1)
     assert fp64.calibration_recipe() == defaults.calibration_recipe()
     assert fp64.recipe(model_family="qwen3", layer_end=1)["hessian_dtype"] == "float64"
+    dense_recipe = defaults.recipe(model_family="qwen3", layer_end=1)
+    assert "min_expert_coverage" not in dense_recipe and "moe_protocol" not in dense_recipe
+    moe_recipe = defaults.recipe(model_family="qwen3_moe", layer_end=1)
+    assert moe_recipe["min_expert_coverage"] == 0
+    moe_protocol = cast(dict[str, object], moe_recipe["moe_protocol"])
+    assert moe_protocol["reconstruction"] == "whole-block-after-all-projections"
+    assert moe_protocol["router"] == "unquantized-trained-and-saved"
 
 
 @pytest.mark.parametrize(
@@ -161,7 +170,7 @@ def test_package_and_fixed_grid():
     torch.testing.assert_close(cb.by_idxs(torch.arange(256).reshape(1, -1)), cb.grid.reshape(1, -1))
 
 
-@pytest.mark.parametrize("width", [128, 256, 2560, 5120, 9728])
+@pytest.mark.parametrize("width", [128, 256, 768, 2048, 2560, 5120, 9728])
 def test_upstream_128_block_hadamard(width):
     from unisvq.utils.matmul_had import matmul_hadU
 
@@ -212,20 +221,121 @@ def test_real_ldlq_and_saved_dense_decode(tune_iters):
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="Released Linear requires CUDA")
-def test_whole_block_reconstruction(tiny_unisvq):
+@pytest.mark.parametrize("shape", [(768, 2048), (2048, 768)])
+def test_real_moe_projection_ldlq_and_backward(shape):
+    from unisvq import codebook
+    from unisvq import utils as upstream_utils
+    from unisvq.algo import quip
+    from unisvq.linear import QuantizedLinear
+
+    torch.set_num_threads(2)
+    torch.manual_seed(19)
+    out_features, in_features = shape
+    weight = torch.randn(shape) * 0.02
+    source = torch.randn(32, in_features)
+    metric = source.T @ source / len(source) + torch.eye(in_features) * 0.1
+    args = SimpleNamespace(
+        use_fp64=False,
+        lora_rank=0,
+        incoh_mode="had",
+        rescale_WH=False,
+        sigma_reg=0.01,
+        scale_override=0.83,
+        resid_scale_override=-1,
+        no_use_buffered=False,
+        lowmem_ldlq=False,
+        quip_tune_iters=10,
+    )
+    cb = codebook.get_codebook("identical", codebook_bit=2)
+    scale = weight.square().mean().sqrt()
+    decoded, saved = quip.quantize(metric, weight / scale, 0, cb, args, device="cuda:0")
+    saved["SV"] *= scale
+    saved.update(fused=False, shapes=[shape], scales=[1.0], bias=None)
+    actual = reconstruct_dense_weight(saved, torch.device("cuda:0"))
+    torch.testing.assert_close(actual, decoded.cpu() * scale, atol=1e-4, rtol=0.003)
+    linear = QuantizedLinear(
+        in_features,
+        out_features,
+        cb.codesz,
+        cb.packsz,
+        cb.pack_out,
+        cb.version,
+        rank=0,
+        train_mode=False,
+        grad_ckpt=True,
+        codebook_id=codebook.get_id("identical"),
+        codebook_bit=2,
+        idx_dtype=str(cb.idx_dtype),
+    )
+    upstream_utils.unpack_quip(linear, saved, codebook.get_id("identical"), cb.codesz)
+    linear.SU = torch.nn.Parameter(linear.get_buffer("SU").float())
+    linear.SV = torch.nn.Parameter(linear.get_buffer("SV").float())
+    linear.cuda()
+    inputs = (torch.randn(2, 4, in_features, device="cuda") * 0.1).requires_grad_()
+    with torch.autocast("cuda", dtype=torch.float16):
+        output = linear(inputs)
+        expected = torch.nn.functional.linear(inputs, actual.cuda())
+    torch.testing.assert_close(output, expected.float(), atol=0.002, rtol=0.03)
+    output.square().mean().backward()
+    for parameter in (inputs, linear.SU, linear.SV):
+        assert parameter.grad is not None
+        assert torch.isfinite(parameter.grad).all() and parameter.grad.abs().sum() > 0
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="Released Linear requires CUDA")
+@pytest.mark.parametrize("family", ["dense", "moe"])
+def test_whole_block_reconstruction(tiny_unisvq, family):
     config, hf = tiny_unisvq
-    model = Qwen3ForCausalLM(hf).bfloat16().eval().requires_grad_(False)
+    if family == "moe":
+        hf = Qwen3MoeConfig(
+            vocab_size=128,
+            hidden_size=128,
+            intermediate_size=256,
+            moe_intermediate_size=128,
+            num_hidden_layers=1,
+            num_attention_heads=2,
+            num_key_value_heads=2,
+            num_experts=4,
+            num_experts_per_tok=1,
+        )
+        hf.update({"head_dim": 64})
+        hf._attn_implementation = "sdpa"
+        model = Qwen3MoeForCausalLM(hf).bfloat16().eval().requires_grad_(False)
+        with torch.no_grad():
+            router = model.get_parameter("model.layers.0.mlp.gate.weight")
+            router[1].copy_(-router[0])
+            router[2].copy_(router[0] * 0.5)
+            router[3].copy_(router[0] * -0.5)
+    else:
+        model = Qwen3ForCausalLM(hf).bfloat16().eval().requires_grad_(False)
+    specs = projections(4 if family == "moe" else 0)
     tokens = torch.randint(0, 128, (6, 8))
     train = capture_replay(model, tokens[:4], device="cuda:0", microbatch_size=1)
     valid = capture_replay(model, tokens[4:], device="cuda:0", microbatch_size=1)
     layer = model.model.layers[0].cuda()
+    split_work_experts(layer)
     collectors = LayerHessianCollectors(layer, include_padding=True, dtype=torch.float32)
     train_replay = train.forward_original(layer, device="cuda:0", collectors=collectors)
     valid_replay = valid.forward_original(layer, device="cuda:0")
     config.hessians.mkdir(parents=True)
     config.checkpoints.mkdir()
     for name, collector in collectors.collectors.items():
-        torch.save(collector.close(center=True), config.hessians / f"0_{name}.pt")
+        # Zero-coverage experts cannot be normalized by the collector's dense close().
+        matrix, first, count = collector.close_statistics()
+        if count:
+            matrix /= count
+            first /= count
+            matrix -= first[:, None] * first[None, :]
+        torch.save(
+            {
+                "flatH": torch.cat([row[: i + 1] for i, row in enumerate(matrix)]),
+                "mu": first,
+                "n": matrix.shape[0],
+                "ct": count,
+                **({"total_tokens": tokens[:4].numel()} if name.startswith("expert") else {}),
+            },
+            config.hessians / f"0_{name}.pt",
+        )
     calls = []
 
     class Observed(UniSVQReconstruction):
@@ -234,9 +344,12 @@ def test_whole_block_reconstruction(tiny_unisvq):
 
             assert all(
                 isinstance(block.get_submodule(attribute), QuantizedLinear)
-                for attribute, *_ in PROJECTIONS
+                for attribute, *_ in specs
             )
             super().__call__(block, name, orig_dtype)
+            assert all(
+                block.get_submodule(attribute).built_codebook_class for attribute, *_ in specs
+            )
             calls.append(name)
 
     trainer = Observed(
@@ -247,7 +360,7 @@ def test_whole_block_reconstruction(tiny_unisvq):
     assert calls == ["0"]
     with torch.no_grad():
         layer.cuda()
-        for attribute, short, *_ in PROJECTIONS:
+        for attribute, short, *_ in specs:
             saved = torch.load(config.checkpoints / f"0_{short}.pt", weights_only=True)
             assert saved["SU"].dtype == saved["SV"].dtype == torch.float16
             linear = layer.get_submodule(attribute)

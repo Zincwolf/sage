@@ -34,31 +34,27 @@ class DistributedReconstruction:
         self.distributed.sum_(totals)
         return (totals[0] / totals[1]).item()
 
-    def __call__(self, layer: nn.Module, name: str, orig_dtype: torch.dtype) -> None:
+    @torch.no_grad()
+    def materialize_layer(self, layer: nn.Module, dtype: torch.dtype) -> None:
+        """Initialize all lazy projections, including experts absent from local replay."""
         device = self.distributed.device
         layer.to(device).eval()
-        # Materialize upstream lazy quantized modules before snapshot or optimizer.
-        with (
-            torch.no_grad(),
-            torch.autocast(
-                device_type=device.type, dtype=orig_dtype, enabled=orig_dtype != torch.float32
-            ),
-        ):
+        with torch.autocast(device_type=device.type, dtype=dtype, enabled=dtype != torch.float32):
             experts = getattr(layer.mlp, "experts", None)
             if isinstance(experts, LinearExperts):
                 # Routing may never visit an expert. Materialize every expert before
                 # snapshots/optimizer creation so state layout is identical on all ranks.
-                hidden = torch.zeros(
-                    1, self.train.inputs.shape[-1], device=device, dtype=orig_dtype
-                )
+                hidden = torch.zeros(1, self.train.inputs.shape[-1], device=device, dtype=dtype)
                 for expert in experts:
                     expert(hidden)
             source = self.train.inputs[:1].to(device)
             if not len(source):
-                source = torch.zeros(
-                    (1, *self.train.inputs.shape[1:]), device=device, dtype=orig_dtype
-                )
+                source = torch.zeros((1, *self.train.inputs.shape[1:]), device=device, dtype=dtype)
             self.train.state.forward(layer, source)
+
+    def __call__(self, layer: nn.Module, name: str, orig_dtype: torch.dtype) -> None:
+        device = self.distributed.device
+        self.materialize_layer(layer, orig_dtype)
 
         ordinary, susv = [], []
         for parameter_name, parameter in layer.named_parameters():

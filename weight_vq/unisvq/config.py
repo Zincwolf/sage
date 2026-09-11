@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Literal
+from typing import Literal, cast
 
 from weight_vq.blockwise.config import BlockwiseConfig
 
@@ -14,6 +14,8 @@ class UniSVQConfig(BlockwiseConfig):
     hessian_sequence_length: int = 4096
     # Statistics accumulation/storage only; upstream quantizer precision is unchanged.
     hessian_dtype: Literal["float32", "float64"] = "float32"
+    # Expert token coverage; zero coverage always uses the identity metric.
+    min_expert_coverage: float = 0.0
     train_samples: int = 896
     validation_samples: int = 128
     sequence_length: int = 4096
@@ -48,6 +50,13 @@ class UniSVQConfig(BlockwiseConfig):
         }
 
     def recipe(self, *, model_family: str, layer_end: int) -> dict[str, object]:
+        shared = super().recipe(model_family=model_family, layer_end=layer_end)
+        if model_family == "qwen3_moe":
+            shared["moe_protocol"] = {
+                **cast(dict[str, object], shared["moe_protocol"]),
+                "reconstruction": "whole-block-after-all-projections",
+                "router": "unquantized-trained-and-saved",
+            }
         return {
             "schema_version": 1,
             "format": "unisvq-blockwise-full-state-dense-qdq",
@@ -59,5 +68,5 @@ class UniSVQConfig(BlockwiseConfig):
             "reconstruction": "whole-block-teacher-inputs-fp16-autocast-summed-microbatch-means",
             "saved_susv_dtype": "float16",
             "saved_norms": ["input_layernorm", "post_attention_layernorm"],
-            **super().recipe(model_family=model_family, layer_end=layer_end),
+            **shared,
         }

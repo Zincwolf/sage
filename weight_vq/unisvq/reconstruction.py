@@ -22,11 +22,8 @@ class UniSVQReconstruction(DistributedReconstruction):
 
         config = cast(UniSVQConfig, self.config)
         device = self.distributed.device
-        layer.to(device)
         # The upstream validation path has no autocast; training explicitly uses FP16.
-        # Initialize lazy QuantizedLinear buffers before taking the best-state snapshot.
-        with torch.no_grad():
-            self.train.state.forward(layer, self.train.inputs[:1].to(device))
+        self.materialize_layer(layer, torch.float32)
         susv, ordinary = extract_susv_params(layer)
         optimizer = get_susv_adam(
             susv,

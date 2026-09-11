@@ -1,0 +1,41 @@
+# Author's released identical W2 PTQ, extended to native Qwen3 MoE.
+model: /path/to/Qwen3-30B-A3B-Instruct-2507
+dataset: /path/to/RedPajama/Arrows
+output_dir: /path/to/outputs/unisvq/qwen3-30b-a3b
+devices: [0, 1, 2, 3]
+model_dtype: bfloat16
+seed: 0
+num_cpu_threads: 8
+
+# Retain the released truncated-document sampling and calibration sizes.
+hessian_samples: 1024
+hessian_sequence_length: 4096
+hessian_dtype: float32
+train_samples: 896
+validation_samples: 128
+sequence_length: 4096
+
+# Resource controls: global sequences per chunk, physical microbatches,
+# and CPU replay storage. Smaller chunks increase statistics I/O.
+hessian_chunk_size: 64
+forward_microbatch_size: 1
+reconstruction_microbatch_size: 1
+replay_device: cpu
+
+# Expert tokens / original calibration tokens, without a top-k multiplier.
+# Research threshold: 0.0 falls back only for zero coverage; 0.005 means 0.5%.
+# Fallback uses an identity metric and retains identical W2 encoding.
+min_expert_coverage: 0.0
+
+# Preserve the released 128-block Hadamard, LDLQ, and whole-block reconstruction.
+sigma_reg: 0.01
+scale_override: 0.83
+quip_tune_iters: 10
+reconstruction_epochs: 1
+learning_rate: 0.00005
+susv_learning_rate: 0.0005
+batch_size: 4
+gradient_accumulation_steps: 2
+early_stop: 3
+# Recompute Linear activations during backward to reduce MoE reconstruction memory.
+gradient_checkpointing: true

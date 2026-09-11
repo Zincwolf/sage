@@ -305,10 +305,12 @@ def _run_rank(
                         # Released quantize_llama_layer/hfize persist only these norms.
                         # q/k norm parameters are trained upstream but discarded at export;
                         # preserve that behavior rather than silently improve the method.
+                        # MoE additionally persists its unquantized, trained router.
                         auxiliary = {
                             name: value
                             for name, value in auxiliary.items()
                             if name in ("input_layernorm.weight", "post_attention_layernorm.weight")
+                            or (expert_count and name == "mlp.gate.weight")
                             or name.endswith(".bias")
                         }
                     utils.atomic_torch_save(auxiliary, config.checkpoints / f"{index}.auxiliary.pt")
@@ -346,8 +348,6 @@ def _run_rank(
 def _run_workers(config: Config, stage: Stage) -> None:
     family, model_layers = _model_contract(config.model)
     hf_config = AutoConfig.from_pretrained(config.model, local_files_only=True)
-    if family == "qwen3_moe" and isinstance(config, UniSVQConfig):
-        raise ValueError("MoE quantization is supported only by QTIP and QuIP#")
     start, end = layer_range(config, model_layers)
     load_calibration(config)
     marker = config.hessians / "complete.json"

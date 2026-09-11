@@ -35,7 +35,7 @@ def collector_modules(layer: nn.Module) -> dict[str, nn.Linear]:
 def load_quantization_hessian(
     path: str | Path, min_expert_coverage: float
 ) -> tuple[torch.Tensor, dict[str, Any]]:
-    # Both methods use the upstream symmetric unpacking convention.
+    # All methods use the upstream symmetric unpacking convention.
     from lib.utils import flat_to_sym
 
     statistics = torch.load(path, map_location="cpu", weights_only=True)

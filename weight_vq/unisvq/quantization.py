@@ -11,7 +11,9 @@ import torch
 from torch import nn
 
 from weight_vq import utils
-from weight_vq.blockwise.artifacts import PROJECTIONS
+from weight_vq.blockwise.artifacts import projections
+from weight_vq.blockwise.hessian import load_quantization_hessian
+from weight_vq.blockwise.models import LinearExperts
 from weight_vq.unisvq.config import UniSVQConfig
 from weight_vq.unisvq.reconstruction import UniSVQReconstruction
 
@@ -41,19 +43,16 @@ def quantize_layer(
         lowmem_ldlq=False,
     )
     saved_projections = {}
-    for attribute, short, hessian_name, _ in PROJECTIONS:
+    experts = getattr(layer.mlp, "experts", None)
+    specs = projections(len(experts) if isinstance(experts, LinearExperts) else 0)
+    for attribute, short, hessian_name, _ in specs:
         cb = codebook.get_codebook(config.codebook, codebook_bit=config.codebook_bit)
         linear = attrgetter(attribute)(layer)
         with torch.no_grad():
-            statistics = torch.load(
-                config.hessians / f"{index}_{hessian_name}.pt",
-                map_location="cpu",
-                weights_only=True,
+            hessian, metadata = load_quantization_hessian(
+                config.hessians / f"{index}_{hessian_name}.pt", config.min_expert_coverage
             )
-            hessian = upstream_utils.flat_to_sym(statistics["flatH"], statistics["n"])
-            mu = statistics["mu"]
-            hessian.add_(mu[:, None] * mu[None, :])
-            hessian = upstream_utils.regularize_H(hessian, statistics["n"], config.sigma_reg)
+            hessian = upstream_utils.regularize_H(hessian, hessian.shape[0], config.sigma_reg)
             weight = linear.weight.detach().float().cpu()
             scale = weight.square().mean().sqrt()
             _decoded, saved = quip.quantize(hessian, weight / scale, 0, cb, args, str(device))
@@ -63,6 +62,7 @@ def quantize_layer(
                 shapes=[weight.shape],
                 scales=[1.0],
                 bias=None if linear.bias is None else linear.bias.detach().cpu().clone(),
+                **metadata,
             )
             quantized = QuantizedLinear(
                 linear.in_features,
@@ -83,16 +83,16 @@ def quantize_layer(
                 quantized, saved, codebook.get_id(config.codebook), cb.codesz
             )
             saved_projections[short] = saved
-            del statistics, hessian, mu, weight, _decoded
+            del hessian, weight, _decoded
         quantized.SU = nn.Parameter(quantized.get_buffer("SU").float())
         quantized.SV = nn.Parameter(quantized.get_buffer("SV").float())
         parent, name = attribute.rsplit(".", 1)
         setattr(attrgetter(parent)(layer), name, quantized)
         del linear
-    # Unlike the existing QuIP#/QTIP path, reconstruct only after all seven replacements.
+    # The released PTQ reconstructs once, after replacing the entire block.
     reconstruction(layer, str(index), original_dtype)
     if reconstruction.distributed.is_primary:
-        for attribute, short, *_ in PROJECTIONS:
+        for attribute, short, *_ in specs:
             quantized = attrgetter(attribute)(layer)
             saved = saved_projections[short]
             # Preserve the released checkpoint's FP16 SU/SV storage, not QuIP#'s FP32.
