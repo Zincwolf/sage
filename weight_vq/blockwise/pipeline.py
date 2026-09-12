@@ -90,7 +90,10 @@ def _initialize_run(config: Config, family: str, end: int) -> None:
     ]
     recipe_path = config.checkpoints / f"{method}_config.json"
     if recipe_path.exists():
-        if json.loads(recipe_path.read_text()) != recipe:
+        saved_recipe = json.loads(recipe_path.read_text())
+        # Older recipes included this execution-only memory/compute tradeoff.
+        saved_recipe.pop("gradient_checkpointing", None)
+        if saved_recipe != recipe:
             raise RuntimeError("configuration differs from checkpoints; use a new output_dir")
     else:
         utils.atomic_write_text(recipe_path, json.dumps(recipe, indent=2) + "\n")
@@ -436,6 +439,8 @@ def export(config: Config) -> None:
     ]
     recipe_name = f"{method}_config.json"
     recipe = json.loads((config.checkpoints / recipe_name).read_text())
+    # Accept legacy recipes without rewriting the original checkpoint provenance.
+    recipe.pop("gradient_checkpointing", None)
     if recipe != config.recipe(model_family=family, layer_end=end):
         raise RuntimeError("export configuration differs from checkpoint recipe")
     missing = [

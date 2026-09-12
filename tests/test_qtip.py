@@ -54,12 +54,19 @@ def test_recipe_separates_execution_and_algorithm(tmp_path):
         "sampling": "replacement-full-documents-concatenate-reshape",
     }
     assert cfg.calibration_recipe()["train"] == {"shape": [256, 2048]}
-    for key in ("devices", "replay_device", "forward_microbatch_size", "output_dir"):
+    for key in (
+        "devices",
+        "replay_device",
+        "forward_microbatch_size",
+        "output_dir",
+        "gradient_checkpointing",
+    ):
         assert key not in recipe
 
 
+@pytest.mark.parametrize("legacy_checkpointing", [None, False, True])
 def test_export_loads_auxiliary_norms_and_preserves_untouched_modules(
-    tmp_path, monkeypatch, capsys
+    tmp_path, monkeypatch, capsys, legacy_checkpointing
 ):
     cfg = config(tmp_path)
     model = Qwen3ForCausalLM(
@@ -90,9 +97,10 @@ def test_export_loads_auxiliary_norms_and_preserves_untouched_modules(
     for name, value in auxiliary.items():
         model.model.layers[0].get_parameter(name).data.copy_(value)
     atomic_write_completion(0, cfg.checkpoints)
-    (cfg.checkpoints / "qtip_config.json").write_text(
-        json.dumps(cfg.recipe(model_family="qwen3", layer_end=1))
-    )
+    recipe = cfg.recipe(model_family="qwen3", layer_end=1)
+    if legacy_checkpointing is not None:
+        recipe["gradient_checkpointing"] = legacy_checkpointing
+    (cfg.checkpoints / "qtip_config.json").write_text(json.dumps(recipe))
     monkeypatch.setattr(
         "weight_vq.blockwise.pipeline.reconstruct_dense_weight",
         lambda saved, recipe: saved["weight"],

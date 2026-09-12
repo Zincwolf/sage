@@ -101,6 +101,7 @@ class BlockwiseConfig:
             "reconstruction_microbatch_size",
             "replay_device",
             "num_cpu_threads",
+            "gradient_checkpointing",
             "layer_start",
             "layer_end",
         ):
