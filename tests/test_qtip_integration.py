@@ -60,7 +60,10 @@ def tiny_qtip(tmp_path):
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="real QTIP test requires CUDA")
 @pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
-def test_real_block_updates_fixed_indices_and_dense_reconstruction(tiny_qtip, dtype):
+@pytest.mark.parametrize("gradient_checkpointing", [False, True])
+def test_real_block_updates_fixed_indices_and_dense_reconstruction(
+    tiny_qtip, dtype, gradient_checkpointing, monkeypatch
+):
     # Method-environment dependencies: actual QTIP, not a mocked quantizer.
     from lib.algo import finetune
     from lib.codebook.bitshift import bitshift_codebook
@@ -71,7 +74,7 @@ def test_real_block_updates_fixed_indices_and_dense_reconstruction(tiny_qtip, dt
         model_dtype=str(dtype).removeprefix("torch."),
         train_samples=8,
         reconstruction_epochs=5,
-        gradient_checkpointing=True,
+        gradient_checkpointing=gradient_checkpointing,
     )
     model = Qwen3ForCausalLM(hf).to(dtype).eval()
     tokens = torch.randint(0, 128, (12, 16))
@@ -86,13 +89,23 @@ def test_real_block_updates_fixed_indices_and_dense_reconstruction(tiny_qtip, dt
     for name, payload in collectors.close().items():
         torch.save(payload, config.hessians / f"0_{name}.pt")
     # Fixed LUT fixture bypasses the unrelated million-point k-means initializer.
+    tlut_path = config.checkpoints / "tlut-l16-b9-v2.pt"
+    torch.save(torch.randn(512, 2), tlut_path)
     codebook = bitshift_codebook(
-        L=16, K=2, V=2, tlut_bits=9, decode_mode="quantlut_sym", tlut=torch.randn(512, 2)
+        L=16, K=2, V=2, tlut_bits=9, decode_mode="quantlut_sym", tlut_path=tlut_path
     )
     trainer = DistributedReconstruction(
         train_replay, valid_replay, config, DistributedContext(0, 1, torch.device("cuda:0")), 7
     )
     completed = []
+    clean_boundaries = []
+    clean = finetune.utils.clean
+
+    def observe_clean():
+        clean_boundaries.append(len(completed))
+        clean()
+
+    monkeypatch.setattr(finetune.utils, "clean", observe_clean)
 
     def reconstruct(block, name, orig_dtype):
         block.cuda()
@@ -129,7 +142,8 @@ def test_real_block_updates_fixed_indices_and_dense_reconstruction(tiny_qtip, dt
             assert f"{norm}.weight" in changed
         if name == "0_v":
             assert "self_attn.q_proj.weight" in changed
-        block.cuda()
+        assert all(parameter.is_cuda for parameter in block.parameters())
+        assert codebook.lut.is_cuda
         assert trainer.validation_loss(block, orig_dtype) <= initial_loss
         completed.append(name)
 
@@ -149,6 +163,9 @@ def test_real_block_updates_fixed_indices_and_dense_reconstruction(tiny_qtip, dt
     finally:
         torch.set_grad_enabled(grad_enabled)
     assert completed == [f"0_{short}" for _, short, *_ in PROJECTIONS]
+    assert clean_boundaries == [len(PROJECTIONS)]
+    assert all(parameter.device.type == "cpu" for parameter in layer.parameters())
+    assert codebook.lut.device.type == "cpu"
     with torch.no_grad():
         layer.cuda()
         # Compare in FP32 to isolate serialization/decoding from BF16 GEMM rounding.
