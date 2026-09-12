@@ -10,7 +10,7 @@ from torch import nn
 from torch.multiprocessing.spawn import spawn
 
 from weight_vq.blockwise.distributed import DistributedContext
-from weight_vq.hessian import LinearHessianCollectors, MaskedHessianCollector
+from weight_vq.blockwise.hessian import MaskedHessianCollector
 
 
 @pytest.mark.parametrize("dtype", [torch.float32, torch.float64])
@@ -75,13 +75,17 @@ def test_raw_chunk_statistics_are_summed_before_normalization() -> None:
 def test_linear_mapping_collects_each_projection_input() -> None:
     first = nn.Linear(2, 3, bias=False)
     second = nn.Linear(3, 1, bias=False)
-    collectors = LinearHessianCollectors({"first": first, "second": second})
+    collectors = {
+        name: MaskedHessianCollector(module)
+        for name, module in (("first", first), ("second", second))
+    }
     values = torch.tensor([[[1.0, 3.0], [9.0, 7.0], [-1.0, 5.0]]])
     mask = torch.tensor([[True, False, True]])
-    collectors.set_position_mask(mask)
+    for collector in collectors.values():
+        collector.set_position_mask(mask)
     hidden = first(values)
     second(hidden)
-    results = collectors.close()
+    results = {name: collector.close() for name, collector in collectors.items()}
     for name, inputs in (("first", values), ("second", hidden)):
         selected = inputs[mask].detach()
         rows, columns = torch.tril_indices(selected.shape[1], selected.shape[1])

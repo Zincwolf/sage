@@ -44,7 +44,7 @@ def test_reconstruction_rejects_short_documents_and_keeps_prefixes_with_replacem
     torch.testing.assert_close(actual, torch.tensor([[3, 4, 5, 6]]).expand(5, -1))
 
 
-def test_calibration_artifact_protocol_and_stage_splits(tmp_path, monkeypatch):
+def test_calibration_artifact_protocol_and_stage_splits(tmp_path, monkeypatch, capsys):
     from datasets import DatasetInfo
 
     config = QTIPConfig(
@@ -69,12 +69,20 @@ def test_calibration_artifact_protocol_and_stage_splits(tmp_path, monkeypatch):
     monkeypatch.setattr(
         "weight_vq.blockwise.calibration.AutoTokenizer.from_pretrained", lambda *a, **k: tokenizer
     )
+    capsys.readouterr()  # Exclude the fixture's Dataset.save_to_disk progress.
     calibration(config)
+    progress = capsys.readouterr()
+    assert not progress.out
+    assert progress.err.isascii()
+    assert "Calibration: Hessian tokens" in progress.err
+    assert "Calibration: reconstruction tokens" in progress.err
+    assert progress.err.count("100%") == 2
     payload = load_calibration(config)
     assert payload["hessian"].shape == (3, 8)
     assert payload["train"].shape == (2, 4)
     assert payload["validation"].shape == (1, 4)
     assert not payload["source"]["upstream_sample_identity_verified"]
     calibration(config)
+    assert "reusing saved samples" in capsys.readouterr().err
     with pytest.raises(RuntimeError, match="protocol differs"):
         load_calibration(replace(config, sequence_length=5))

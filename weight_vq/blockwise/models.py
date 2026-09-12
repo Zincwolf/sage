@@ -13,6 +13,10 @@ def language_backbone(model: Any) -> Any:
 
 
 def layer_expert_count(config: Any, index: int) -> int:
+    """Args:
+        config: Huggingface AutoConfig
+        index: 0-based decoder layer index
+    """
     if (
         config.model_type == "qwen3_moe"
         and index not in config.mlp_only_layers
@@ -28,9 +32,15 @@ class LinearExperts(nn.ModuleList):
     def forward(
         self, hidden_states: torch.Tensor, top_k_index: torch.Tensor, top_k_weights: torch.Tensor
     ) -> torch.Tensor:
+        """Args:
+            hidden_states: [num_tokens, hidden_size]
+            top_k_index: [num_tokens, num_experts_per_token]
+            top_k_weights: [num_tokens, num_experts_per_token]
+        """
         result = torch.zeros_like(hidden_states)
         # Match the native eager expert dispatch, exposing Linear calls for statistics/FT.
         with torch.no_grad():
+            # len(self): num_experts, mask: [num_experts, num_experts_per_token, num_tokens]
             mask = torch.nn.functional.one_hot(top_k_index, num_classes=len(self)).permute(2, 1, 0)
             hits = mask.sum(dim=(-1, -2)).nonzero().flatten().tolist()
         for index in hits:

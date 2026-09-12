@@ -22,6 +22,7 @@ class ReplayState:
     microbatch_size: int
 
     def forward(self, layer: nn.Module, hidden: torch.Tensor) -> torch.Tensor:
+        """Functional forward."""
         positions = torch.arange(hidden.shape[1], device=hidden.device).unsqueeze(0)
         mask_factory = (
             create_sliding_window_causal_mask
@@ -58,6 +59,7 @@ class ReplayState:
         device: torch.device | str,
         collectors: LayerHessianCollectors | None = None,
     ) -> LayerReplay:
+        """State-machine-style forward."""
         inputs = self.inputs
         outputs = torch.empty_like(inputs)
         for start in range(0, len(inputs), self.microbatch_size):

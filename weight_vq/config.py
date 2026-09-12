@@ -45,12 +45,3 @@ class CalibrationMetadata:
     train_samples: int
     validation_samples: int
     sequence_length: int
-
-
-@dataclass(frozen=True)
-class PendingPipelineConfig:
-    """Temporary common shape replaced by each verified method adapter."""
-
-    model: Path
-    calibration: Path
-    output: Path

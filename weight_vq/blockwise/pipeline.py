@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import sys
 import tempfile
 from copy import deepcopy
 from functools import partial
@@ -16,6 +17,7 @@ from lib.algo import finetune
 from lib.codebook.bitshift import bitshift_codebook
 from torch import nn
 from torch.multiprocessing.spawn import spawn
+from tqdm import tqdm
 from transformers import (
     AutoConfig,
     AutoModelForCausalLM,
@@ -132,7 +134,8 @@ def _run_rank(
             # Raw per-layer accumulators live on disk between calibration chunks.
             # Only one layer's GPU collectors and one projection's CPU merge
             # (current plus previous matrix) are resident.
-            for chunk_start in range(0, len(data["hessian"]), config.hessian_chunk_size):
+            chunks = range(0, len(data["hessian"]), config.hessian_chunk_size)
+            for chunk_index, chunk_start in enumerate(chunks):
                 chunk = data["hessian"][chunk_start : chunk_start + config.hessian_chunk_size]
                 last_chunk = chunk_start + len(chunk) == len(data["hessian"])
                 state = capture_replay(
@@ -142,7 +145,16 @@ def _run_rank(
                     microbatch_size=config.forward_microbatch_size,
                     placement="cuda",
                 )
-                for index in range(end):
+                for index in tqdm(
+                    range(end),
+                    desc=f"Hessian chunk {chunk_index + 1}/{len(chunks)}",
+                    total=len(chunks) * end,
+                    initial=chunk_index * end,
+                    unit="layer",
+                    disable=not distributed.is_primary,
+                    ascii=not sys.stderr.isatty(),
+                    mininterval=5,
+                ):
                     layer = deepcopy(layers[index]).to(distributed.device)
                     split_work_experts(layer)
                     collectors = (
@@ -359,6 +371,7 @@ def _run_workers(config: Config, stage: Stage) -> None:
             for index in range(start, end)
         ):
             if stage == "hessian":
+                print("Hessian complete; reusing saved statistics.", file=sys.stderr)
                 return
         else:
             raise RuntimeError("published Hessian artifact is incomplete")
