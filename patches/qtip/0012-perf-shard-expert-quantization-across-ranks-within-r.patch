@@ -1,0 +1,450 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Zincwolf <zincwolf@outlook.com>
+Date: Sat, 12 Sep 2026 18:52:53 +0800
+Subject: [PATCH] perf: shard expert quantization across ranks within
+ reconstruction groups
+
+---
+ lib/algo/finetune.py | 394 +++++++++++++++++++++++++------------------
+ 1 file changed, 227 insertions(+), 167 deletions(-)
+
+diff --git a/lib/algo/finetune.py b/lib/algo/finetune.py
+index 0b172a1..8b128fd 100644
+--- a/lib/algo/finetune.py
++++ b/lib/algo/finetune.py
+@@ -5,10 +5,12 @@ import copy
+ import math
+ import os
+ from contextlib import contextmanager
++from itertools import groupby
+ from operator import attrgetter
+ 
+ import glog
+ import torch
++import torch.distributed as dist
+ from torch import multiprocessing as mp
+ from torch import nn
+ from transformers import AutoModelForCausalLM
+@@ -135,7 +137,8 @@ def quantize_finetune_decoder_layer(mixed_layer, quant_order, idx, cb, args,
+                                     progress_callback=None,
+                                     write_checkpoints=True,
+                                     hessian_loader=None,
+-                                    reconstruction_groups=None):
++                                    reconstruction_groups=None,
++                                    projection_owners=None):
+     torch.manual_seed(getattr(args, 'seed', 0) + idx)
+     torch.set_num_threads(args.num_cpu_threads)
+     torch.set_grad_enabled(False)
+@@ -250,189 +253,246 @@ def quantize_finetune_decoder_layer(mixed_layer, quant_order, idx, cb, args,
+                 attrgetter('.'.join(split_attr[:-1]))(mixed_layer),
+                 split_attr[-1],
+                 build_quantized_linear(projection_payloads[name], m, n))
+-    for quant_i, (linear_attr, name, in_hess_name, out_hess_name,
+-                  rcp) in enumerate(quant_order):
+-        if quant_i < completed:
++    # None owners retain replicated quantization (e.g. attention). Assigned
++    # projections require the caller's initialized default process group.
++    rank = dist.get_rank() if projection_owners is not None else None
++    group_keys = (
++        reconstruction_groups
++        if reconstruction_groups is not None
++        and (args.reconstruction_epochs > 0 or projection_owners is not None)
++        else range(len(quant_order)))
++    for _, entries in groupby(enumerate(quant_order),
++                              key=lambda entry: group_keys[entry[0]]):
++        pending = [(i, spec) for i, spec in entries if i >= completed]
++        if not pending:
+             continue
+-        orig_linear = attrgetter(linear_attr)(mixed_layer)
+-        W = orig_linear.weight.to(dtype_)
+-        del orig_linear
+-        (m, n) = W.shape
+-        SU = (torch.randn(n, device=device).sign() + 1e-5).sign().to(dtype_)
+-        SV = (torch.randn(m, device=device).sign() + 1e-5).sign().to(dtype_)
+-
+-        in_hess_path = f'{args.hessians}/{idx}_{in_hess_name}.pt'
+-        metric_metadata = {}
+-        if hessian_loader is None:
+-            H_data = torch.load(in_hess_path, map_location=torch.device('cpu'))
+-            HR = utils.flat_to_sym(H_data['flatH'], H_data['n'])
+-            if 'mu' in H_data:
+-                mu = H_data['mu']
+-                HR += mu[None, :] * mu[:, None]
+-                del mu
+-            del H_data
+-        else:
+-            HR, metric_metadata = hessian_loader(in_hess_path)
++        if projection_owners is not None:
++            local_count = sum(projection_owners[i] in (None, rank)
++                              for i, _ in pending)
++            glog.info(f'{idx}_{pending[-1][1][1]} initial quantization '
++                      f'rank {rank}: {local_count}/{len(pending)} projections')
++        for quant_i, (linear_attr, name, in_hess_name, out_hess_name,
++                      rcp) in pending:
++            orig_linear = attrgetter(linear_attr)(mixed_layer)
++            m, n = orig_linear.weight.shape
++            # Consume the same random signs on every rank, including skipped
++            # experts, so assignment and card count do not change the algorithm.
++            SU = (torch.randn(n, device=device).sign() + 1e-5).sign().to(dtype_)
++            SV = (torch.randn(m, device=device).sign() + 1e-5).sign().to(dtype_)
++            if (projection_owners is not None
++                    and projection_owners[quant_i] not in (None, rank)):
++                del orig_linear, SU, SV
++                continue
++            W = orig_linear.weight.to(dtype_)
++            del orig_linear
++
++            in_hess_path = f'{args.hessians}/{idx}_{in_hess_name}.pt'
++            metric_metadata = {}
++            if hessian_loader is None:
++                H_data = torch.load(in_hess_path, map_location=torch.device('cpu'))
++                HR = utils.flat_to_sym(H_data['flatH'], H_data['n'])
++                if 'mu' in H_data:
++                    mu = H_data['mu']
++                    HR += mu[None, :] * mu[:, None]
++                    del mu
++                del H_data
++            else:
++                HR, metric_metadata = hessian_loader(in_hess_path)
+ 
+-        HR = utils.regularize_H(HR, args.sigma_reg)
++            HR = utils.regularize_H(HR, args.sigma_reg)
+ 
+-        if args.split_for_tp:
+-            if rcp == 'col':
+-                # split along output dimension
+-                Wr = utils.matmul_hadUt(
+-                    utils.matmul_hadUt((W.T.to(device) * SV).reshape(
+-                        n * args.tp_rank, m // args.tp_rank)).reshape(
+-                            W.T.shape).T * SU)
+-                HRr = utils.matmul_hadUt(
+-                    utils.matmul_hadUt(HR.to(device) * SU).T * SU)
++            if args.split_for_tp:
++                if rcp == 'col':
++                    # split along output dimension
++                    Wr = utils.matmul_hadUt(
++                        utils.matmul_hadUt((W.T.to(device) * SV).reshape(
++                            n * args.tp_rank, m // args.tp_rank)).reshape(
++                                W.T.shape).T * SU)
++                    HRr = utils.matmul_hadUt(
++                        utils.matmul_hadUt(HR.to(device) * SU).T * SU)
+ 
+-                Wscale = Wr.reshape(
+-                    args.tp_rank, m * n // args.tp_rank).square().mean(
+-                        dim=-1).sqrt() / (cb.lut.to(
+-                            torch.float64).square().mean().sqrt().float() *
+-                                          args.scale_override)
+-                Wr = Wr.reshape(args.tp_rank,
+-                                m * n // args.tp_rank) / Wscale.unsqueeze(-1)
+-                Wr = Wr.reshape(m, n)
+-
+-            elif rcp == 'row':
+-                # split along input dimension
+-                Wr = utils.matmul_hadUt(
+-                    (utils.matmul_hadUt(W.T.to(device) * SV).T * SU).reshape(
+-                        m * args.tp_rank, n // args.tp_rank)).reshape(W.shape)
+-                HRr = utils.matmul_hadUt(
+-                    (utils.matmul_hadUt((HR.to(device) * SU).reshape(
+-                        n * args.tp_rank, n // args.tp_rank)).reshape(n, n).T *
+-                     SU).reshape(n * args.tp_rank,
+-                                 n // args.tp_rank)).reshape(n, n)
+-                Wscale = Wr.reshape(
+-                    m, args.tp_rank,
+-                    n // args.tp_rank).transpose(0, 1).reshape(
++                    Wscale = Wr.reshape(
+                         args.tp_rank, m * n // args.tp_rank).square().mean(
+                             dim=-1).sqrt() / (cb.lut.to(
+                                 torch.float64).square().mean().sqrt().float() *
+                                               args.scale_override)
++                    Wr = Wr.reshape(args.tp_rank,
++                                    m * n // args.tp_rank) / Wscale.unsqueeze(-1)
++                    Wr = Wr.reshape(m, n)
++
++                elif rcp == 'row':
++                    # split along input dimension
++                    Wr = utils.matmul_hadUt(
++                        (utils.matmul_hadUt(W.T.to(device) * SV).T * SU).reshape(
++                            m * args.tp_rank, n // args.tp_rank)).reshape(W.shape)
++                    HRr = utils.matmul_hadUt(
++                        (utils.matmul_hadUt((HR.to(device) * SU).reshape(
++                            n * args.tp_rank, n // args.tp_rank)).reshape(n, n).T *
++                         SU).reshape(n * args.tp_rank,
++                                     n // args.tp_rank)).reshape(n, n)
++                    Wscale = Wr.reshape(
++                        m, args.tp_rank,
++                        n // args.tp_rank).transpose(0, 1).reshape(
++                            args.tp_rank, m * n // args.tp_rank).square().mean(
++                                dim=-1).sqrt() / (cb.lut.to(
++                                    torch.float64).square().mean().sqrt().float() *
++                                                  args.scale_override)
++                    Wr = Wr.reshape(m, args.tp_rank, n // args.tp_rank).transpose(
++                        0, 1).reshape(args.tp_rank,
++                                      m * n // args.tp_rank) / Wscale.unsqueeze(-1)
++                    Wr = Wr.reshape(args.tp_rank, m,
++                                    n // args.tp_rank).transpose(0,
++                                                                 1).reshape(m, n)
++
++            else:
++                Wr = utils.matmul_hadUt(
++                    utils.matmul_hadUt(W.T.to(device) * SV).T * SU)
++                HRr = utils.matmul_hadUt(
++                    utils.matmul_hadUt(HR.to(device) * SU).T * SU)
++
++                Wscale = Wr.square().mean().sqrt() / (
++                    cb.lut.to(torch.float64).square().mean().sqrt().float() *
++                    args.scale_override)
++                Wr /= Wscale
++
++            block_ldl = utils.block_LDL(HRr, args.td_y)
++            if block_ldl is None:
++                # Finite-precision Hadamard transforms can lose positive definiteness.
++                # Restore symmetry and retry once with damping in these coordinates.
++                HRr = (HRr + HRr.T) * 0.5
++                HRr.diagonal().add_(HRr.diagonal().mean() * args.sigma_reg)
++                block_ldl = utils.block_LDL(HRr.contiguous(), args.td_y)
++            if block_ldl is None:
++                raise RuntimeError(
++                    f'block LDL failed for layer {idx} projection {name}')
++            LRr = block_ldl[0]
++            del block_ldl
++            diag = torch.arange(n, device=LRr.device)
++            LRr[diag, diag] = 0
++
++            hatWr, Qidxs = ldlq.LDLQ(Wr, LRr, cb, args, for_kernel=has_kernel)
++
++            Qidxs = Qidxs.cpu()
++            packed = cb.pack_trellis(
++                Qidxs.reshape(m // args.td_x, args.td_x, n // args.td_y,
++                              args.td_y // args.V).transpose(1, 2).reshape(
++                                  -1, args.td_x * args.td_y // args.V))
++
++            if has_kernel:
++                packed = packed.view(torch.uint8).view(-1, 2).flip(
++                    (-1, )).reshape(m // 16 // 2, 2, n // 16 // 2, 2, 16 * 16 // 8,
++                                    args.K).permute(0, 2, 4, 3, 1, 5).flip(
++                                        (-1, )).contiguous().flatten().view(
++                                            torch.int16).reshape(packed.shape)
++            else:
++                packed = packed.view(torch.int16)
++
++            if args.split_for_tp and rcp == 'col':
++                Wr = (Wr.reshape(args.tp_rank, m * n // args.tp_rank) *
++                      Wscale.unsqueeze(-1)).reshape(m, n)
++                hatWr = (hatWr.reshape(args.tp_rank, m * n // args.tp_rank) *
++                         Wscale.unsqueeze(-1)).reshape(m, n)
++            elif args.split_for_tp and rcp == 'row':
+                 Wr = Wr.reshape(m, args.tp_rank, n // args.tp_rank).transpose(
+-                    0, 1).reshape(args.tp_rank,
+-                                  m * n // args.tp_rank) / Wscale.unsqueeze(-1)
++                    0, 1).reshape(args.tp_rank, -1) * Wscale.unsqueeze(-1)
+                 Wr = Wr.reshape(args.tp_rank, m,
+-                                n // args.tp_rank).transpose(0,
+-                                                             1).reshape(m, n)
+-
+-        else:
+-            Wr = utils.matmul_hadUt(
+-                utils.matmul_hadUt(W.T.to(device) * SV).T * SU)
+-            HRr = utils.matmul_hadUt(
+-                utils.matmul_hadUt(HR.to(device) * SU).T * SU)
+-            
+-            Wscale = Wr.square().mean().sqrt() / (
+-                cb.lut.to(torch.float64).square().mean().sqrt().float() *
+-                args.scale_override)
+-            Wr /= Wscale
+-
+-        block_ldl = utils.block_LDL(HRr, args.td_y)
+-        if block_ldl is None:
+-            # Finite-precision Hadamard transforms can lose positive definiteness.
+-            # Restore symmetry and retry once with damping in these coordinates.
+-            HRr = (HRr + HRr.T) * 0.5
+-            HRr.diagonal().add_(HRr.diagonal().mean() * args.sigma_reg)
+-            block_ldl = utils.block_LDL(HRr.contiguous(), args.td_y)
+-        if block_ldl is None:
+-            raise RuntimeError(
+-                f'block LDL failed for layer {idx} projection {name}')
+-        LRr = block_ldl[0]
+-        del block_ldl
+-        diag = torch.arange(n, device=LRr.device)
+-        LRr[diag, diag] = 0
+-
+-        hatWr, Qidxs = ldlq.LDLQ(Wr, LRr, cb, args, for_kernel=has_kernel)
+-
+-        Qidxs = Qidxs.cpu()
+-        packed = cb.pack_trellis(
+-            Qidxs.reshape(m // args.td_x, args.td_x, n // args.td_y,
+-                          args.td_y // args.V).transpose(1, 2).reshape(
+-                              -1, args.td_x * args.td_y // args.V))
+-
+-        if has_kernel:
+-            packed = packed.view(torch.uint8).view(-1, 2).flip(
+-                (-1, )).reshape(m // 16 // 2, 2, n // 16 // 2, 2, 16 * 16 // 8,
+-                                args.K).permute(0, 2, 4, 3, 1, 5).flip(
+-                                    (-1, )).contiguous().flatten().view(
+-                                        torch.int16).reshape(packed.shape)
+-        else:
+-            packed = packed.view(torch.int16)
+-
+-        if args.split_for_tp and rcp == 'col':
+-            Wr = (Wr.reshape(args.tp_rank, m * n // args.tp_rank) *
+-                  Wscale.unsqueeze(-1)).reshape(m, n)
+-            hatWr = (hatWr.reshape(args.tp_rank, m * n // args.tp_rank) *
+-                     Wscale.unsqueeze(-1)).reshape(m, n)
+-        elif args.split_for_tp and rcp == 'row':
+-            Wr = Wr.reshape(m, args.tp_rank, n // args.tp_rank).transpose(
+-                0, 1).reshape(args.tp_rank, -1) * Wscale.unsqueeze(-1)
+-            Wr = Wr.reshape(args.tp_rank, m,
+-                            n // args.tp_rank).transpose(0, 1).reshape(m, n)
+-            hatWr = hatWr.reshape(m, args.tp_rank,
+-                                  n // args.tp_rank).transpose(0, 1).reshape(
+-                                      args.tp_rank, -1) * Wscale.unsqueeze(-1)
+-            hatWr = hatWr.reshape(args.tp_rank, m,
+-                                  n // args.tp_rank).transpose(0, 1).reshape(
+-                                      m, n)
+-        else:
+-            Wr *= Wscale
+-            hatWr *= Wscale
+-
+-        err = torch.trace(
+-            (Wr - hatWr) @ HRr @ (Wr - hatWr).T) / torch.trace(Wr @ HRr @ Wr.T)
+-        print(
+-            f'{idx}_{name} proxy err {err.item()} tr(WHW.T) {torch.trace(Wr @ HRr @ Wr.T)}'
+-        )
+-        
+-        # 0 = no tensor parallelism, 1 = row parallel, 2 = column parallel
+-        rcp_int = 0
+-        if args.split_for_tp:
+-            rcp_int = 1 if rcp == 'row' else 2
+-
+-        payload = {
+-            **metric_metadata,
+-            'trellis': packed.cpu(),
+-            'SU': SU.to(orig_dtype).cpu(),
+-            'SV': SV.to(orig_dtype).cpu(),
+-            'Wscale': Wscale.cpu(),
+-            'proxy_err': err.item(),
+-            'tlut': (
+-                cb.tlut.data.to(orig_dtype).cpu()
+-                if hasattr(cb, 'tlut') else None
+-            ),
+-            'rcp': rcp_int,
+-            'tp_rank': args.tp_rank,
+-        }
+-        projection_payloads[name] = payload
++                                n // args.tp_rank).transpose(0, 1).reshape(m, n)
++                hatWr = hatWr.reshape(m, args.tp_rank,
++                                      n // args.tp_rank).transpose(0, 1).reshape(
++                                          args.tp_rank, -1) * Wscale.unsqueeze(-1)
++                hatWr = hatWr.reshape(args.tp_rank, m,
++                                      n // args.tp_rank).transpose(0, 1).reshape(
++                                          m, n)
++            else:
++                Wr *= Wscale
++                hatWr *= Wscale
+ 
+-        # Drop live workspaces, but keep allocator blocks reusable by the next
+-        # projection. Forced GC/cache eviction belongs at the layer boundary.
+-        del W, HR, HRr, Wr, hatWr, LRr, Qidxs, diag
++            err = torch.trace(
++                (Wr - hatWr) @ HRr @ (Wr - hatWr).T) / torch.trace(Wr @ HRr @ Wr.T)
++            print(
++                f'{idx}_{name} proxy err {err.item()} tr(WHW.T) {torch.trace(Wr @ HRr @ Wr.T)}'
++            )
+ 
++            # 0 = no tensor parallelism, 1 = row parallel, 2 = column parallel
++            rcp_int = 0
++            if args.split_for_tp:
++                rcp_int = 1 if rcp == 'row' else 2
++
++            payload = {
++                **metric_metadata,
++                'trellis': packed.cpu(),
++                'SU': SU.to(orig_dtype).cpu(),
++                'SV': SV.to(orig_dtype).cpu(),
++                'Wscale': Wscale.cpu(),
++                'proxy_err': err.item(),
++                'tlut': (
++                    cb.tlut.data.to(orig_dtype).cpu()
++                    if hasattr(cb, 'tlut') else None
++                ),
++                'rcp': rcp_int,
++                'tp_rank': args.tp_rank,
++            }
++            projection_payloads[name] = payload
++
++            # Drop live workspaces, but keep allocator blocks reusable by the next
++            # projection. Forced GC/cache eviction belongs at the layer boundary.
++            del W, HR, HRr, Wr, hatWr, LRr, Qidxs, diag, packed, SU, SV, Wscale
++
++        if projection_owners is not None:
++            # No collectives in the quantization loop: all ranks finish their
++            # independent experts before exchanging this group's compact payloads.
++            tensor_fields = ('trellis', 'SU', 'SV', 'Wscale', 'tlut')
++            owners = sorted({projection_owners[i] for i, _ in pending
++                             if projection_owners[i] is not None})
++            for owner in owners:
++                names = [spec[1] for i, spec in pending
++                         if projection_owners[i] == owner]
++                metadata = [None]
++                if rank == owner:
++                    metadata[0] = {
++                        name: (
++                            {key: value for key, value in projection_payloads[name].items()
++                             if key not in tensor_fields},
++                            {key: (None if projection_payloads[name][key] is None else
++                                   (projection_payloads[name][key].shape,
++                                    projection_payloads[name][key].dtype))
++                             for key in tensor_fields})
++                        for name in names}
++                # Only scalars and shape/dtype metadata are pickled, never tensors.
++                dist.broadcast_object_list(metadata, src=owner, device=device)
++                for name in names:
++                    scalars, tensor_specs = metadata[0][name]
++                    data = projection_payloads[name] if rank == owner else dict(scalars)
++                    for key, spec in tensor_specs.items():
++                        if spec is None:
++                            data[key] = None
++                            continue
++                        shape, dtype = spec
++                        value = (data[key].to(device).contiguous() if rank == owner
++                                 else torch.empty(shape, dtype=dtype, device=device))
++                        # NCCL has no int16 type for packed trellis indices.
++                        # A byte view preserves every dtype/bit without conversion.
++                        dist.broadcast(value.reshape(-1).view(torch.uint8), src=owner)
++                        if rank != owner:
++                            data[key] = value.cpu()
++                        del value
++                    projection_payloads[name] = data
++
++        quant_i, (_, name, _, _, _) = pending[-1]
+         if args.reconstruction_epochs == 0:
+             if progress_callback is not None:
+                 progress_callback(quant_i + 1, projection_payloads)
+-            del packed, SU, SV, Wscale
+             continue
+-        
+-        q_linear = build_quantized_linear(payload, m, n)
+-
+-        del packed, SU, SV, Wscale
+-
+-        split_attr = linear_attr.split('.')
+-        setattr(
+-            attrgetter('.'.join(split_attr[:-1]))(mixed_layer), split_attr[-1],
+-            q_linear)
+ 
+-        # Caller may reconstruct once after a group of expert projections.
+-        if (reconstruction_groups is not None
+-                and quant_i + 1 < len(quant_order)
+-                and reconstruction_groups[quant_i] == reconstruction_groups[quant_i + 1]):
+-            continue
++        # Rebuild in the original order only after the entire group is available.
++        # Every rank then enters the unchanged reconstruction with a full layer.
++        for _, (linear_attr, short, _, _, _) in pending:
++            m, n = attrgetter(linear_attr)(mixed_layer).weight.shape
++            q_linear = build_quantized_linear(projection_payloads[short], m, n)
++            split_attr = linear_attr.split('.')
++            setattr(
++                attrgetter('.'.join(split_attr[:-1]))(mixed_layer), split_attr[-1],
++                q_linear)
+ 
+         with torch.enable_grad():
+             if reconstruction_callback is None:

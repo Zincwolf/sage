@@ -288,6 +288,18 @@ def _run_rank(
                         None,
                         reconstruction_callback=reconstruction,
                         write_checkpoints=distributed.is_primary,
+                        # Attention remains replicated. Experts are independent
+                        # within each reconstruction group; synchronize at its end.
+                        projection_owners=(
+                            [
+                                int(attribute.split(".")[2]) % distributed.world_size
+                                if attribute.startswith("mlp.experts.")
+                                else None
+                                for attribute, *_ in specs
+                            ]
+                            if expert_count and distributed.world_size > 1
+                            else None
+                        ),
                         hessian_loader=partial(
                             load_quantization_hessian,
                             min_expert_coverage=config.min_expert_coverage,
