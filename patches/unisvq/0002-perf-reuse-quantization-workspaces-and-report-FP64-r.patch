@@ -1,0 +1,187 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Zincwolf <zincwolf@outlook.com>
+Date: Sun, 13 Sep 2026 08:35:41 +0800
+Subject: [PATCH] perf: reuse quantization workspaces and report FP64 recovery
+
+---
+ unisvq/algo/quip.py        | 43 ++++++++++++++++----------------------
+ unisvq/utils/math_utils.py |  4 ++--
+ unisvq/utils/matmul_had.py |  4 +---
+ 3 files changed, 21 insertions(+), 30 deletions(-)
+
+diff --git a/unisvq/algo/quip.py b/unisvq/algo/quip.py
+index a6b1d76..c90f1f1 100644
+--- a/unisvq/algo/quip.py
++++ b/unisvq/algo/quip.py
+@@ -178,12 +178,8 @@ def LDLQ_buffered(Wr, Hr, L, D, cb, args, buf_cols=128):
+     hatWr_T = torch.zeros(n, m, dtype=Hr.dtype, device=Hr.device)
+     Qidxs_T = torch.zeros(n // cb.codesz, m, dtype=cb.idx_dtype, device=Hr.device)
+ 
+-    device = Wr.device
+-    Wr = Wr.cpu()
+-    Hr = Hr.cpu()
+-    utils.clean()
+-    Wr_T = Wr.T.contiguous().to(device)
+-    Hr_T = Hr.T.contiguous().to(device)
++    Wr_T = Wr.T.contiguous()
++    Hr_T = Hr.T.contiguous()
+ 
+     # quip
+     prod_cache = torch.zeros(n, m, dtype=Wr_T.dtype, device=Wr_T.device)
+@@ -208,7 +204,6 @@ def LDLQ_buffered(Wr, Hr, L, D, cb, args, buf_cols=128):
+         hatWr_T[cb.codesz * (cur_col - buf_size):cb.codesz * cur_col] = b_hatWr_T
+ 
+     del b_Wr_T, b_hatWr_T, b_L, b_prod, L_offset, prod_cache
+-    utils.clean()
+ 
+     # tune
+     for ie in range(args.quip_tune_iters):
+@@ -246,7 +241,6 @@ def LDLQ_buffered(Wr, Hr, L, D, cb, args, buf_cols=128):
+             Qidxs_T[cur_col - buf_size:cur_col] = b_Qidxs_T
+ 
+         del delta_T, b_hatWr_T, b_Hr_T, b_delta_T, b_Qidxs_T, Hr_offset
+-        utils.clean()
+ 
+     return hatWr_T.T.contiguous(), Qidxs_T.T.contiguous()
+ 
+@@ -287,7 +281,6 @@ def LDLQ_buffered_lowmem(Wr, Hr, L, D, cb, args, buf_cols=128):
+         prod_cache += (b_Wr - b_hatWr) @ b_L
+ 
+     del b_Wr, b_hatWr, b_L, b_prod, L_offset, prod_cache
+-    utils.clean()
+ 
+     # tune
+     for ie in range(args.quip_tune_iters):
+@@ -332,12 +325,12 @@ def LDLQ_buffered_lowmem(Wr, Hr, L, D, cb, args, buf_cols=128):
+                         (i + 1)] -= b_hatWr[:,
+                                             cb.codesz * i:cb.codesz * (i + 1)]
+         del delta, b_hatWr, b_Hr, b_delta, b_Qidxs, Hr_offset
+-        utils.clean()
+ 
+     return hatWr, Qidxs
+ 
+ 
+-def quantize(H_orig, W_orig, rank, codebook_orig, args, device='cpu'):
++def quantize(H_orig, W_orig, rank, codebook_orig, args, device='cpu', *,
++             reuse_codebook=False, on_retry=None):
+     orig_device = H_orig.device
+     W_orig_dtype = W_orig.dtype
+     dtype_ = torch.float64 if args.use_fp64 else torch.float32
+@@ -345,12 +338,14 @@ def quantize(H_orig, W_orig, rank, codebook_orig, args, device='cpu'):
+ 
+     H = H_orig.clone().to(dtype_).to(device)
+     W = W_orig.clone().to(dtype_).to(device)
+-    codebook = copy.deepcopy(codebook_orig).to(dtype_)
++    # Fixed FP32 codebooks can be caller-owned; FP64 recovery needs a private copy.
++    codebook = (codebook_orig if reuse_codebook and not args.use_fp64
++                else copy.deepcopy(codebook_orig).to(dtype_))
+ 
+     assert (m % 2 == 0)
+     assert (n % 4 == 0)
+-    assert (torch.all(torch.isfinite(H.cpu())))
+-    assert (torch.all(torch.isfinite(W.cpu())))
++    assert (torch.all(torch.isfinite(H)))
++    assert (torch.all(torch.isfinite(W)))
+ 
+     # incoherence preprocessing
+     incoh_out = incoherence_preprocess(H, W, args)
+@@ -362,11 +357,13 @@ def quantize(H_orig, W_orig, rank, codebook_orig, args, device='cpu'):
+         glog.debug('incoherence_preprocess failed, recomputing in fp64')
+         del H, W, codebook
+         utils.clean()
+-        return quantize(H_orig, W_orig, rank, codebook_orig, new_args, device)
++        if on_retry is not None:
++            on_retry(new_args)
++        return quantize(H_orig, W_orig, rank, codebook_orig, new_args, device,
++                        reuse_codebook=reuse_codebook, on_retry=on_retry)
+ 
+     Lhr, Hr, Wr, SU, SV, scaleWH = incoh_out
+     del incoh_out
+-    utils.clean()
+ 
+     glog.info(f'mean square of W: {W.square().mean()}')
+     glog.info(f'mean square of Wr: {Wr.square().mean()}')
+@@ -390,12 +387,14 @@ def quantize(H_orig, W_orig, rank, codebook_orig, args, device='cpu'):
+         glog.debug('block_LDL failed, recomputing in fp64')
+         del H, W, codebook, Lhr, Hr, Wr, SU, SV, scaleWH, Wo
+         utils.clean()
+-        return quantize(H_orig, W_orig, rank, codebook_orig, new_args, device)
++        if on_retry is not None:
++            on_retry(new_args)
++        return quantize(H_orig, W_orig, rank, codebook_orig, new_args, device,
++                        reuse_codebook=reuse_codebook, on_retry=on_retry)
+ 
+     L, D = block_LDL_out
+     del block_LDL_out
+     del codebook_orig
+-    utils.clean()
+ 
+     # LDLQ
+     Wscale = Wr.square().mean().sqrt() / getattr(codebook, "codebook_scale", 1.0)
+@@ -442,12 +441,7 @@ def quantize(H_orig, W_orig, rank, codebook_orig, args, device='cpu'):
+ 
+     del W_orig, H_orig
+ 
+-    Wr = Wr.cpu()
+-    Hr = Hr.cpu()
+-    L = L.cpu()
+-    D = D.cpu()
+     del Wr, Hr, L, D
+-    utils.clean()
+ 
+     # best_hatWr = best_hatWr * best_Wscale
+ 
+@@ -473,8 +467,7 @@ def quantize(H_orig, W_orig, rank, codebook_orig, args, device='cpu'):
+         'scaleWH': scaleWH,
+     }
+ 
+-    utils.clean()
+-
++    # The caller releases the layer workspace at its boundary.
+     return hatW.to(W_orig_dtype).to(orig_device), attr
+ 
+ 
+diff --git a/unisvq/utils/math_utils.py b/unisvq/utils/math_utils.py
+index e4cba1a..dc90514 100644
+--- a/unisvq/utils/math_utils.py
++++ b/unisvq/utils/math_utils.py
+@@ -27,7 +27,7 @@ def block_LDL(H, b, check_nan=True, sigma_reg=0.01):
+         except:
+             retry += 1
+     DL = torch.diagonal(L.reshape(m, b, m, b), dim1=0, dim2=2).permute(2, 0, 1)
+-    D = (DL @ DL.permute(0, 2, 1)).cpu()
++    D = DL @ DL.permute(0, 2, 1)
+     DL = torch.linalg.inv(DL)
+     L = L.view(n, m, b)
+     for i in range(m):
+@@ -37,7 +37,7 @@ def block_LDL(H, b, check_nan=True, sigma_reg=0.01):
+         return None
+ 
+     L = L.reshape(n, n)
+-    return (L, D.to(DL.device))
++    return (L, D)
+ 
+ 
+ def approx_int_sqrt(n):
+diff --git a/unisvq/utils/matmul_had.py b/unisvq/utils/matmul_had.py
+index 3a09c3c..eb55bba 100644
+--- a/unisvq/utils/matmul_had.py
++++ b/unisvq/utils/matmul_had.py
+@@ -5,8 +5,6 @@ import torch
+ from safetensors import safe_open
+ import fast_hadamard_transform
+ 
+-from unisvq import utils
+-
+ hadamard_mats = {}
+ with safe_open(join(dirname(__file__), "hadamard.mod.safetensors"), framework="pt", device="cpu") as f:
+     k_sort = []
+@@ -36,7 +34,7 @@ def matmul_hadU(X, transpose=False):
+         output = output.view(input.shape[0], input.shape[1], -1)  # (m, n/2, 2), the second dim is the current group unit dimension
+         (input, output) = (output, input)  # Swap input/output for in-place operation, saving memory
+     del output
+-    utils.clean()
++    # Reuse the allocator across transforms; the caller owns workspace cleanup.
+     # Loop complete, final output (m, k, n/k), n/k divisible by 2
+     if K > 1:
+         # Final multiply by a K-dim Hadamard matrix, mixing across n/k group units

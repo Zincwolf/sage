@@ -8,12 +8,10 @@ import glog
 import torch
 from torch import nn
 
-from weight_vq import utils
 from weight_vq.blockwise.config import BlockwiseConfig
 from weight_vq.blockwise.distributed import DistributedContext
 from weight_vq.blockwise.models import LinearExperts
 from weight_vq.blockwise.replay import LayerReplay
-from weight_vq.qtip.config import QTIPConfig
 
 
 @dataclass
@@ -115,9 +113,4 @@ class DistributedReconstruction:
                     key: value.detach().cpu().clone() for key, value in layer.state_dict().items()
                 }
         layer.load_state_dict(best_state)
-        # QTIP immediately continues quantizing this private work layer. Its
-        # quantizer owns the final CPU handoff; avoid offloading every group.
-        # Other methods retain their existing reconstruction handoff contract.
-        if not isinstance(self.config, QTIPConfig):
-            layer.cpu()
-            utils.clear_cuda_cache()
+        # Quantizers own the final CPU handoff; the next group reuses this layer.

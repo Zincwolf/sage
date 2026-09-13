@@ -10,7 +10,6 @@ import torch
 from torch import nn
 from torch.utils.data import DataLoader, TensorDataset
 
-from weight_vq import utils
 from weight_vq.blockwise.reconstruction import DistributedReconstruction
 from weight_vq.unisvq.config import UniSVQConfig
 
@@ -87,5 +86,4 @@ class UniSVQReconstruction(DistributedReconstruction):
                 if worse >= config.early_stop:
                     break
         layer.load_state_dict(best_state)
-        layer.cpu()
-        utils.clear_cuda_cache()
+        # The quantizer persists the trained payloads and owns the final CPU handoff.

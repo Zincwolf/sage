@@ -276,6 +276,12 @@ def _run_rank(
                 reconstruction = trainer(
                     train_layer, validation_layer, config, distributed, config.seed + index
                 )
+                # Expert ownership is shared by all quantizers; attention stays replicated.
+                owners = {
+                    short: int(attribute.split(".")[2]) % distributed.world_size
+                    for attribute, short, *_ in specs
+                    if attribute.startswith("mlp.experts.") and distributed.world_size > 1
+                }
                 if isinstance(config, QTIPConfig):
                     finetune.quantize_finetune_decoder_layer(
                         layer,
@@ -291,14 +297,7 @@ def _run_rank(
                         # Attention remains replicated. Experts are independent
                         # within each reconstruction group; synchronize at its end.
                         projection_owners=(
-                            [
-                                int(attribute.split(".")[2]) % distributed.world_size
-                                if attribute.startswith("mlp.experts.")
-                                else None
-                                for attribute, *_ in specs
-                            ]
-                            if expert_count and distributed.world_size > 1
-                            else None
+                            [owners.get(short) for _, short, *_ in specs] if owners else None
                         ),
                         hessian_loader=partial(
                             load_quantization_hessian,
@@ -317,10 +316,14 @@ def _run_rank(
                     )
                 elif isinstance(config, UniSVQConfig):
                     quantize_unisvq_layer(
-                        layer, index, config, cast(UniSVQReconstruction, reconstruction)
+                        layer,
+                        index,
+                        config,
+                        cast(UniSVQReconstruction, reconstruction),
+                        projection_owners=owners,
                     )
                 else:
-                    quantize_layer(layer, index, config, reconstruction)
+                    quantize_layer(layer, index, config, reconstruction, projection_owners=owners)
                 if distributed.is_primary:
                     prefixes = tuple(f"{attribute}." for attribute, *_ in specs)
                     auxiliary = {

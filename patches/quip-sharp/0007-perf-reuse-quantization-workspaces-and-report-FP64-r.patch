@@ -1,0 +1,235 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Zincwolf <zincwolf@outlook.com>
+Date: Sun, 13 Sep 2026 08:35:41 +0800
+Subject: [PATCH] perf: reuse quantization workspaces and report FP64 recovery
+
+---
+ quip_sharp/algo/quip.py                   | 44 ++++++++++-------------
+ quip_sharp/codebook/latticee8_padded12.py |  5 +--
+ quip_sharp/linear/quantized_linear.py     |  4 +--
+ quip_sharp/utils/math_utils.py            |  4 +--
+ quip_sharp/utils/matmul_had.py            |  4 +--
+ 5 files changed, 27 insertions(+), 34 deletions(-)
+
+diff --git a/quip_sharp/algo/quip.py b/quip_sharp/algo/quip.py
+index aa7c9e5..0cbeed2 100644
+--- a/quip_sharp/algo/quip.py
++++ b/quip_sharp/algo/quip.py
+@@ -195,12 +195,8 @@ def LDLQ_buffered(Wr, Hr, L, D, cb, args, buf_cols=128):
+                           dtype=cb.idx_dtype,
+                           device=Hr.device)
+ 
+-    device = Wr.device
+-    Wr = Wr.cpu()
+-    Hr = Hr.cpu()
+-    utils.clean()
+-    Wr_T = Wr.T.contiguous().to(device)
+-    Hr_T = Hr.T.contiguous().to(device)
++    Wr_T = Wr.T.contiguous()
++    Hr_T = Hr.T.contiguous()
+ 
+     # quip
+     prod_cache = torch.zeros(n, m, dtype=Wr_T.dtype, device=Wr_T.device)
+@@ -229,7 +225,6 @@ def LDLQ_buffered(Wr, Hr, L, D, cb, args, buf_cols=128):
+                 cur_col] = b_hatWr_T
+ 
+     del b_Wr_T, b_hatWr_T, b_L, b_prod, L_offset, prod_cache
+-    utils.clean()
+ 
+     # tune
+     for ie in range(args.quip_tune_iters):
+@@ -273,7 +268,6 @@ def LDLQ_buffered(Wr, Hr, L, D, cb, args, buf_cols=128):
+             Qidxs_T[cur_col - buf_size:cur_col] = b_Qidxs_T
+ 
+         del delta_T, b_hatWr_T, b_Hr_T, b_delta_T, b_Qidxs_T, Hr_offset
+-        utils.clean()
+ 
+     return hatWr_T.T.contiguous(), Qidxs_T.T.contiguous()
+ 
+@@ -314,7 +308,6 @@ def LDLQ_buffered_lowmem(Wr, Hr, L, D, cb, args, buf_cols=128):
+         prod_cache += (b_Wr - b_hatWr) @ b_L
+ 
+     del b_Wr, b_hatWr, b_L, b_prod, L_offset, prod_cache
+-    utils.clean()
+ 
+     # tune
+     for ie in range(args.quip_tune_iters):
+@@ -359,12 +352,12 @@ def LDLQ_buffered_lowmem(Wr, Hr, L, D, cb, args, buf_cols=128):
+                         (i + 1)] -= b_hatWr[:,
+                                             cb.codesz * i:cb.codesz * (i + 1)]
+         del delta, b_hatWr, b_Hr, b_delta, b_Qidxs, Hr_offset
+-        utils.clean()
+ 
+     return hatWr, Qidxs
+ 
+ 
+-def quantize(H_orig, W_orig, rank, codebook_orig, args, device='cpu'):
++def quantize(H_orig, W_orig, rank, codebook_orig, args, device='cpu', *,
++             reuse_codebook=False, on_retry=None):
+     orig_device = H_orig.device
+     W_orig_dtype = W_orig.dtype
+     dtype_ = torch.float64 if args.use_fp64 else torch.float32
+@@ -372,12 +365,15 @@ def quantize(H_orig, W_orig, rank, codebook_orig, args, device='cpu'):
+ 
+     H = H_orig.clone().to(dtype_).to(device)
+     W = W_orig.clone().to(dtype_).to(device)
+-    codebook = copy.deepcopy(codebook_orig).to(dtype_)
++    # A caller may keep its fixed FP32 codebook on the device across projections.
++    # FP64 recovery still owns a copy, leaving that workspace unchanged.
++    codebook = (codebook_orig if reuse_codebook and not args.use_fp64
++                else copy.deepcopy(codebook_orig).to(dtype_))
+ 
+     assert (m % 2 == 0)
+     assert (n % 4 == 0)
+-    assert (torch.all(torch.isfinite(H.cpu())))
+-    assert (torch.all(torch.isfinite(W.cpu())))
++    assert (torch.all(torch.isfinite(H)))
++    assert (torch.all(torch.isfinite(W)))
+ 
+     # incoherence preprocessing
+     incoh_out = incoherence_preprocess(H, W, args)
+@@ -389,11 +385,13 @@ def quantize(H_orig, W_orig, rank, codebook_orig, args, device='cpu'):
+         glog.info('incoherence_preprocess failed, recomputing in fp64')
+         del H, W, codebook
+         utils.clean()
+-        return quantize(H_orig, W_orig, rank, codebook_orig, new_args, device)
++        if on_retry is not None:
++            on_retry(new_args)
++        return quantize(H_orig, W_orig, rank, codebook_orig, new_args, device,
++                        reuse_codebook=reuse_codebook, on_retry=on_retry)
+ 
+     Lhr, Hr, Wr, SU, SV, scaleWH = incoh_out
+     del incoh_out
+-    utils.clean()
+ 
+     glog.info(f'mean square of W: {W.square().mean()}')
+     glog.info(f'mean square of Wr: {Wr.square().mean()}')
+@@ -417,12 +415,14 @@ def quantize(H_orig, W_orig, rank, codebook_orig, args, device='cpu'):
+         glog.info('block_LDL failed, recomputing in fp64')
+         del H, W, codebook, Lhr, Hr, Wr, SU, SV, scaleWH, Wo
+         utils.clean()
+-        return quantize(H_orig, W_orig, rank, codebook_orig, new_args, device)
++        if on_retry is not None:
++            on_retry(new_args)
++        return quantize(H_orig, W_orig, rank, codebook_orig, new_args, device,
++                        reuse_codebook=reuse_codebook, on_retry=on_retry)
+ 
+     L, D = block_LDL_out
+     del block_LDL_out
+     del H_orig, W_orig, codebook_orig
+-    utils.clean()
+ 
+     # LDLQ
+     Wscale = Wr.square().mean().sqrt()
+@@ -451,12 +451,7 @@ def quantize(H_orig, W_orig, rank, codebook_orig, args, device='cpu'):
+                                      args,
+                                      buf_cols=128)
+ 
+-    Wr = Wr.cpu()
+-    Hr = Hr.cpu()
+-    L = L.cpu()
+-    D = D.cpu()
+     del Wr, Hr, L, D
+-    utils.clean()
+ 
+     hatWr = hatWr * Wscale
+ 
+@@ -483,8 +478,7 @@ def quantize(H_orig, W_orig, rank, codebook_orig, args, device='cpu'):
+         'scaleWH': scaleWH,
+     }
+ 
+-    utils.clean()
+-
++    # The caller releases the layer workspace at its boundary.
+     return hatW.to(W_orig_dtype).to(orig_device), attr
+ 
+ 
+diff --git a/quip_sharp/codebook/latticee8_padded12.py b/quip_sharp/codebook/latticee8_padded12.py
+index def8aa0..76102ae 100644
+--- a/quip_sharp/codebook/latticee8_padded12.py
++++ b/quip_sharp/codebook/latticee8_padded12.py
+@@ -239,7 +239,8 @@ class QuantizedE8P12Linear(nn.Module):
+ 
+     def cache_WH(self, n, m, Qidxs_list, had_left, had_right, K_left, K_right,
+                  **kwargs):
+-        self.W = matmul_hadU_cuda(
++        # Derived train-mode workspace follows the layer's device, not checkpoints.
++        self.register_buffer('W', matmul_hadU_cuda(
+             matmul_hadU_cuda(
+                 quiptools_cuda.decompress_packed_e8p(
+                     Qidxs_list[0].view(m // 16, n // 64, 8, 4),
+@@ -247,7 +248,7 @@ class QuantizedE8P12Linear(nn.Module):
+                 had_left, K_left).T,
+             had_right,
+             K_right,
+-        ).to(torch.float16)
++        ).to(torch.float16), persistent=False)
+ 
+     def forward(self,
+                 input,
+diff --git a/quip_sharp/linear/quantized_linear.py b/quip_sharp/linear/quantized_linear.py
+index ef2f6db..af8e232 100644
+--- a/quip_sharp/linear/quantized_linear.py
++++ b/quip_sharp/linear/quantized_linear.py
+@@ -5,7 +5,7 @@ import torch
+ import torch.nn as nn
+ 
+ from quip_sharp import codebook
+-from quip_sharp.utils import clean, dtype_from_str, get_hadK
++from quip_sharp.utils import dtype_from_str, get_hadK
+ 
+ 
+ class QuantizedLinear(nn.Module):
+@@ -142,7 +142,7 @@ class QuantizedLinear(nn.Module):
+                 self.had_right = None
+                 self.K_left = None
+                 self.K_right = None
+-                clean()
++                # The quantizer releases the workspace after the complete layer.
+ 
+             self.built_codebook_class = True
+ 
+diff --git a/quip_sharp/utils/math_utils.py b/quip_sharp/utils/math_utils.py
+index 02533e9..26738ab 100644
+--- a/quip_sharp/utils/math_utils.py
++++ b/quip_sharp/utils/math_utils.py
+@@ -20,7 +20,7 @@ def block_LDL(H, b, check_nan=True):
+     except:
+         return None
+     DL = torch.diagonal(L.reshape(m, b, m, b), dim1=0, dim2=2).permute(2, 0, 1)
+-    D = (DL @ DL.permute(0, 2, 1)).cpu()
++    D = DL @ DL.permute(0, 2, 1)
+     DL = torch.linalg.inv(DL)
+     L = L.view(n, m, b)
+     for i in range(m):
+@@ -30,7 +30,7 @@ def block_LDL(H, b, check_nan=True):
+         return None
+ 
+     L = L.reshape(n, n)
+-    return (L, D.to(DL.device))
++    return (L, D)
+ 
+ 
+ def approx_int_sqrt(n):
+diff --git a/quip_sharp/utils/matmul_had.py b/quip_sharp/utils/matmul_had.py
+index 4ac7af9..57c49bf 100644
+--- a/quip_sharp/utils/matmul_had.py
++++ b/quip_sharp/utils/matmul_had.py
+@@ -1,8 +1,6 @@
+ import fast_hadamard_transform
+ import torch
+ 
+-from quip_sharp import utils
+-
+ 
+ # Match the local QTIP adaptation for unsupported widths such as Qwen3's 9728.
+ # Independent 512-wide blocks are NOT the upstream full-dimensional RHT.
+@@ -89,7 +87,7 @@ def matmul_hadU(X, transpose=False):
+         output = output.view(input.shape[0], input.shape[1], -1)
+         (input, output) = (output, input)
+     del output
+-    utils.clean()
++    # Reuse the allocator across transforms; the caller owns workspace cleanup.
+     if K > 1:
+         input = torch.bmm(
+             hadK.repeat(len(input), 1, 1).to(input.device).to(input.dtype),
