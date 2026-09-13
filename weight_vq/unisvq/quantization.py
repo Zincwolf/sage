@@ -49,7 +49,10 @@ def quantize_layer(
         lowmem_ldlq=False,
     )
     experts = getattr(layer.mlp, "experts", None)
-    specs = projections(len(experts) if isinstance(experts, LinearExperts) else 0)
+    specs = projections(
+        len(experts) if isinstance(experts, LinearExperts) else 0,
+        getattr(layer, "block_type", "full_attention"),
+    )
     distributed = reconstruction.distributed
     owners = projection_owners or {}
     retries = []

@@ -121,10 +121,12 @@ class LayerHessianCollectors:
 def collector_modules(layer: nn.Module) -> dict[str, nn.Linear]:
     experts = getattr(layer.mlp, "experts", None)
     count = len(experts) if isinstance(experts, LinearExperts) else 0
-    # q/k/v and expert gate/up share inputs. Keep one collector per Hessian.
+    # Projection specs define shared inputs; retain q/up as the legacy representatives.
     modules = {}
-    for attribute, _short, name, _parallel in projections(count):
-        if attribute.rsplit(".", 1)[1] in ("q_proj", "o_proj", "up_proj", "down_proj"):
+    for attribute, _short, name, _parallel in projections(
+        count, getattr(layer, "block_type", "full_attention")
+    ):
+        if name not in modules or attribute.endswith((".q_proj", ".up_proj")):
             modules[name] = cast(nn.Linear, attrgetter(attribute)(layer))
     return modules
 

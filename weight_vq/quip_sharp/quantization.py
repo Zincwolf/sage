@@ -52,7 +52,7 @@ def quantize_layer(
     saved_projections = {}
     experts = getattr(layer.mlp, "experts", None)
     expert_count = len(experts) if isinstance(experts, LinearExperts) else 0
-    specs = projections(expert_count)
+    specs = projections(expert_count, getattr(layer, "block_type", "full_attention"))
     distributed = reconstruction.distributed
     # Attention keeps Algorithm FT; independent experts join at gate/up/down boundaries.
     for _, entries in groupby(

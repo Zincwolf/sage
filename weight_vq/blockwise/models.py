@@ -7,9 +7,15 @@ from torch import nn
 
 
 def language_backbone(model: Any) -> Any:
-    if model.config.model_type == "mistral3":
+    if model.config.model_type in ("mistral3", "qwen3_5"):
         return model.model.language_model
     return model.model
+
+
+def layer_attention_type(config: Any, index: int) -> str:
+    text = getattr(config, "text_config", config)
+    types = getattr(text, "layer_types", None)
+    return types[index] if types is not None else "full_attention"
 
 
 def layer_expert_count(config: Any, index: int) -> int:

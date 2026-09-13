@@ -15,6 +15,7 @@ from typing import Literal, cast
 import torch
 from lib.algo import finetune
 from lib.codebook.bitshift import bitshift_codebook
+from safetensors import safe_open
 from torch import nn
 from torch.multiprocessing.spawn import spawn
 from tqdm import tqdm
@@ -31,6 +32,7 @@ from weight_vq.blockwise.artifacts import (
     atomic_write_completion,
     hessian_complete,
     layer_complete,
+    projection_layout,
     projections,
     quant_order,
 )
@@ -39,6 +41,7 @@ from weight_vq.blockwise.distributed import process_group
 from weight_vq.blockwise.hessian import LayerHessianCollectors, load_quantization_hessian
 from weight_vq.blockwise.models import (
     language_backbone,
+    layer_attention_type,
     layer_expert_count,
     projection_weight,
     split_work_experts,
@@ -65,13 +68,18 @@ def _model_contract(model: Path) -> tuple[str, int]:
         return config.model_type, int(config.num_hidden_layers)
     if config.model_type == "mistral3" and config.text_config.model_type == "ministral3":
         return "mistral3", int(config.text_config.num_hidden_layers)
+    if config.model_type == "qwen3_5":
+        return "qwen3_5", int(config.text_config.num_hidden_layers)
     raise ValueError(
-        f"Blockwise pipeline supports qwen3, qwen3_moe and Ministral-3, got {config.model_type!r}"
+        "Blockwise pipeline supports qwen3, qwen3_moe, Qwen3.5 and Ministral-3, "
+        f"got {config.model_type!r}"
     )
 
 
 def model_loader(family: str):
-    return AutoModelForImageTextToText if family == "mistral3" else AutoModelForCausalLM
+    return (
+        AutoModelForImageTextToText if family in ("mistral3", "qwen3_5") else AutoModelForCausalLM
+    )
 
 
 def layer_range(config: Config, model_layers: int) -> tuple[int, int]:
@@ -226,7 +234,10 @@ def _run_rank(
             if distributed.is_primary:
                 utils.atomic_write_text(
                     hessian_dir / "complete.json",
-                    json.dumps(config.hessian_recipe(end), indent=2) + "\n",
+                    json.dumps(
+                        config.hessian_recipe(end) | projection_layout(model.config, end), indent=2
+                    )
+                    + "\n",
                 )
             distributed.barrier()
             return
@@ -262,12 +273,31 @@ def _run_rank(
             train_layer = train.forward_original(layer, device=distributed.device)
             validation_layer = validation.forward_original(layer, device=distributed.device)
             expert_count = layer_expert_count(model.config, index)
-            specs = projections(expert_count)
-            if index >= start and not layer_complete(index, config.checkpoints, expert_count):
+            layer_type = layer_attention_type(model.config, index)
+            specs = projections(expert_count, layer_type)
+            if index >= start and not layer_complete(
+                index, config.checkpoints, expert_count, layer_type
+            ):
                 split_work_experts(layer)
                 if distributed.is_primary:
                     (config.checkpoints / f"{index}.complete").unlink(missing_ok=True)
                 layer.requires_grad_(True)
+                if getattr(model.config, "model_type", None) == "qwen3_5":
+                    # New recurrent auxiliaries remain frozen. UniSVQ trains only
+                    # the norms it persists; QTIP/QuIP# also reconstruct attention norms.
+                    layer.requires_grad_(False)
+                    for attribute, *_ in specs:
+                        layer.get_submodule(attribute).requires_grad_(True)
+                    layer.get_submodule("input_layernorm").requires_grad_(True)
+                    layer.get_submodule("post_attention_layernorm").requires_grad_(True)
+                    if not isinstance(config, UniSVQConfig):
+                        norms = (
+                            ("linear_attn.norm",)
+                            if layer_type == "linear_attention"
+                            else ("self_attn.q_norm", "self_attn.k_norm")
+                        )
+                        for attribute in norms:
+                            layer.get_submodule(attribute).requires_grad_(True)
                 trainer = (
                     UniSVQReconstruction
                     if isinstance(config, UniSVQConfig)
@@ -285,7 +315,7 @@ def _run_rank(
                 if isinstance(config, QTIPConfig):
                     finetune.quantize_finetune_decoder_layer(
                         layer,
-                        quant_order(expert_count),
+                        quant_order(expert_count, layer_type),
                         index,
                         codebook,
                         config,
@@ -367,7 +397,7 @@ def _run_rank(
                             config.checkpoints / f"{index}.coverage.json",
                             json.dumps(coverage, indent=2) + "\n",
                         )
-                    atomic_write_completion(index, config.checkpoints, expert_count)
+                    atomic_write_completion(index, config.checkpoints, expert_count, layer_type)
                 distributed.barrier()
                 del reconstruction
             del train_layer, validation_layer
@@ -382,10 +412,17 @@ def _run_workers(config: Config, stage: Stage) -> None:
     load_calibration(config)
     marker = config.hessians / "complete.json"
     if marker.exists():
-        if json.loads(marker.read_text()) != config.hessian_recipe(end):
+        if json.loads(marker.read_text()) != (
+            config.hessian_recipe(end) | projection_layout(hf_config, end)
+        ):
             raise RuntimeError("Hessian protocol differs; use a new output_dir")
         if all(
-            hessian_complete(index, config.hessians, layer_expert_count(hf_config, index))
+            hessian_complete(
+                index,
+                config.hessians,
+                layer_expert_count(hf_config, index),
+                layer_attention_type(hf_config, index),
+            )
             for index in range(start, end)
         ):
             if stage == "hessian":
@@ -431,7 +468,12 @@ def _run_workers(config: Config, stage: Stage) -> None:
         missing = [
             index
             for index in range(start, end)
-            if not layer_complete(index, config.checkpoints, layer_expert_count(hf_config, index))
+            if not layer_complete(
+                index,
+                config.checkpoints,
+                layer_expert_count(hf_config, index),
+                layer_attention_type(hf_config, index),
+            )
         ]
         if missing:
             raise RuntimeError(f"quantize did not complete layers: {missing}")
@@ -461,7 +503,12 @@ def export(config: Config) -> None:
     missing = [
         index
         for index in range(start, end)
-        if not layer_complete(index, config.checkpoints, layer_expert_count(hf_config, index))
+        if not layer_complete(
+            index,
+            config.checkpoints,
+            layer_expert_count(hf_config, index),
+            layer_attention_type(hf_config, index),
+        )
     ]
     if missing:
         raise RuntimeError(f"checkpoints are incomplete for layers: {missing}")
@@ -476,7 +523,9 @@ def export(config: Config) -> None:
     with torch.no_grad():
         for index in range(start, end):
             layer = layers[index]
-            for attribute, short, *_ in projections(layer_expert_count(hf_config, index)):
+            for attribute, short, *_ in projections(
+                layer_expert_count(hf_config, index), layer_attention_type(hf_config, index)
+            ):
                 saved = torch.load(
                     config.checkpoints / f"{index}_{short}.pt",
                     map_location="cpu",
@@ -503,12 +552,26 @@ def export(config: Config) -> None:
                 state[name].copy_(value)
     with tempfile.TemporaryDirectory(prefix=".export-", dir=config.output_dir) as temporary:
         staging = Path(temporary) / "model"
-        model.save_pretrained(staging, safe_serialization=True, max_shard_size="5GB")
+        state_dict = model.state_dict()
+        if family == "qwen3_5":
+            # HF intentionally ignores MTP modules; retain their original tensors on export.
+            for shard_path in config.model.glob("*.safetensors"):
+                with safe_open(shard_path, framework="pt", device="cpu") as shard:
+                    for key in shard.keys():  # noqa: SIM118 - safe_open is not iterable
+                        if key.startswith("mtp."):
+                            state_dict[key] = shard.get_tensor(key)
+        model.save_pretrained(
+            staging, state_dict=state_dict, safe_serialization=True, max_shard_size="5GB"
+        )
         if family == "mistral3":
             AutoProcessor.from_pretrained(
                 config.model, local_files_only=True, fix_mistral_regex=True
             ).save_pretrained(staging)
             shutil.copy2(config.model / "tekken.json", staging / "tekken.json")
+        elif family == "qwen3_5":
+            AutoProcessor.from_pretrained(config.model, local_files_only=True).save_pretrained(
+                staging
+            )
         else:
             AutoTokenizer.from_pretrained(config.model, local_files_only=True).save_pretrained(
                 staging
@@ -529,7 +592,7 @@ def export(config: Config) -> None:
 def validate(config: Config) -> None:
     family, model_layers = _model_contract(config.model)
     start, end = layer_range(config, model_layers)
-    prefix = "model.language_model" if family == "mistral3" else "model"
+    prefix = "model.language_model" if family in ("mistral3", "qwen3_5") else "model"
     if family == "qwen3_moe":
         coverage = json.loads((config.exported_model / "moe_coverage.json").read_text())
         print("layer,experts,zero_coverage,fallback,coverage_min,coverage_median,coverage_max")
@@ -542,7 +605,7 @@ def validate(config: Config) -> None:
                 f"{values.min().item():.6g},{values.quantile(0.5).item():.6g},"
                 f"{values.max().item():.6g}"
             )
-    utils.validate_dense_model(
+    model = utils.validate_dense_model(
         config.exported_model,
         model_loader=model_loader(family),
         # Dense QDQ retains all 30B weights; validate on CPU instead of loading
@@ -554,9 +617,17 @@ def validate(config: Config) -> None:
                 projection_weight(language_backbone(model).layers[index], attribute),
             )
             for index in range(start, end)
-            for attribute, *_ in projections(layer_expert_count(model.config, index))
+            for attribute, *_ in projections(
+                layer_expert_count(model.config, index), layer_attention_type(model.config, index)
+            )
         ),
     )
+    if family == "qwen3_5":
+        tokenizer = AutoTokenizer.from_pretrained(config.exported_model, local_files_only=True)
+        inputs = tokenizer("Hello", return_tensors="pt").to(model.device)
+        with torch.no_grad():
+            output = model.eval()(**inputs, use_cache=False, logits_to_keep=1)
+        print(f"HF text forward: logits shape {tuple(output.logits.shape)}")
 
 
 def run(config: Config) -> None:

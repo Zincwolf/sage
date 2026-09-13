@@ -6,6 +6,10 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Literal
 
+from transformers import AutoConfig
+
+from weight_vq.blockwise.artifacts import projection_layout
+
 
 @dataclass(frozen=True)
 class BlockwiseConfig:
@@ -81,6 +85,13 @@ class BlockwiseConfig:
 
     def recipe(self, *, model_family: str, layer_end: int) -> dict[str, object]:
         payload = asdict(self)
+        if model_family == "qwen3_5":
+            payload.update(
+                projection_layout(
+                    AutoConfig.from_pretrained(self.model, local_files_only=True), layer_end
+                )
+            )
+            payload["recurrent_auxiliaries"] = "frozen-source-weights"
         if model_family == "qwen3_moe":
             payload["moe_protocol"] = {
                 "coverage_denominator": "original-calibration-tokens-including-padding",

@@ -35,6 +35,11 @@ class ReplayState:
             )
             else create_causal_mask
         )
+        if getattr(layer, "block_type", None) == "linear_attention":
+            # Only hybrid decoders require this newer Transformers masking API.
+            from transformers.masking_utils import create_recurrent_attention_mask
+
+            mask_factory = create_recurrent_attention_mask
         mask = mask_factory(
             config=self.model_config,
             inputs_embeds=hidden,

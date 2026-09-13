@@ -1,0 +1,33 @@
+# Released UniSVQ W2 PTQ; Qwen3.5 language projections and complete VL export.
+model: /mnt/hdd/share_folder/Qwen3.5-4B
+dataset: /path/to/RedPajama/Arrows
+output_dir: /path/to/outputs/unisvq/qwen3.5-4b
+devices: [0, 1, 2, 3]
+model_dtype: bfloat16
+seed: 0
+
+hessian_samples: 1024
+hessian_sequence_length: 4096
+hessian_dtype: float32
+train_samples: 896
+validation_samples: 128
+sequence_length: 4096
+
+# Resource controls; retain the released logical batch/accumulation below.
+hessian_chunk_size: 32
+forward_microbatch_size: 1
+reconstruction_microbatch_size: 1
+replay_device: cpu
+num_cpu_threads: 8
+
+# Released 128-block RHT; the 32-channel a/b output axes use full-width H32.
+sigma_reg: 0.01
+scale_override: 0.83
+quip_tune_iters: 10
+reconstruction_epochs: 1
+learning_rate: 0.00005
+susv_learning_rate: 0.0005
+batch_size: 4
+gradient_accumulation_steps: 2
+early_stop: 3
+gradient_checkpointing: true
