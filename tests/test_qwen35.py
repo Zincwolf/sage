@@ -158,7 +158,10 @@ def test_native_replay_hessians_and_sample_independence(qwen35):
     for index, layer in enumerate(backbone.layers):
         specs = projections(layer_type=layer.block_type)
         assert set(attribute for attribute, *_ in specs) == {
-            name for name, module in layer.named_modules() if isinstance(module, torch.nn.Linear)
+            name
+            for name, module in layer.named_modules()
+            if isinstance(module, torch.nn.Linear)
+            and name not in ("linear_attn.in_proj_a", "linear_attn.in_proj_b")
         }
         inputs = {}
         handles = []
@@ -213,7 +216,7 @@ def test_layout_completion_and_recipe(qwen35):
     assert hessian_complete(0, config.hessians, layer_type="linear_attention")
     assert not layer_complete(0, config.checkpoints)
     assert not hessian_complete(0, config.hessians)
-    (config.checkpoints / "0_in_a.pt").unlink()
+    (config.checkpoints / "0_in_qkv.pt").unlink()
     assert not layer_complete(0, config.checkpoints, layer_type="linear_attention")
     recipe = config.recipe(model_family="qwen3_5", layer_end=2)
     model.config.text_config.layer_types.reverse()
@@ -270,6 +273,8 @@ def test_real_mixed_reconstruction_resume_and_vl_export(qwen35, method, monkeypa
                 "linear_attn.conv1d.weight",
                 "linear_attn.A_log",
                 "linear_attn.dt_bias",
+                "linear_attn.in_proj_a.weight",
+                "linear_attn.in_proj_b.weight",
             } <= frozen.keys()
         if method is UniSVQConfig:
             norms = (
@@ -293,13 +298,13 @@ def test_real_mixed_reconstruction_resume_and_vl_export(qwen35, method, monkeypa
         _run_rank(0, config, "quantize", model, 0, 2, config.output_dir / "store", config.hessians)
     finally:
         torch.set_grad_enabled(True)
-    assert len(boundaries) == (2 if method is UniSVQConfig else 15)
+    assert len(boundaries) == (2 if method is UniSVQConfig else 13)
     for key, value in teacher.items():
         torch.testing.assert_close(model.state_dict()[key], value, rtol=0, atol=0)
     stamps = {path: path.stat().st_mtime_ns for path in config.checkpoints.iterdir()}
     quantize(config)
     assert all(path.stat().st_mtime_ns == stamp for path, stamp in stamps.items())
-    (config.checkpoints / "0_in_a.pt").unlink()
+    (config.checkpoints / "0_in_qkv.pt").unlink()
     resumed = replace(config, devices=[0, 1]) if torch.cuda.device_count() > 1 else config
     quantize(resumed)
     assert layer_complete(0, config.checkpoints, layer_type="linear_attention")
@@ -339,7 +344,7 @@ def test_real_mixed_reconstruction_resume_and_vl_export(qwen35, method, monkeypa
             actual = replay.forward(language_backbone(restored).layers[index], source)
             torch.testing.assert_close(actual, expected, atol=0.002, rtol=0.02)
     validate(config)
-    assert "model.language_model.layers.0.linear_attn.in_proj_a" in capsys.readouterr().out
+    assert "model.language_model.layers.0.linear_attn.in_proj_qkv" in capsys.readouterr().out
     # Published statistics cannot be reused after swapping attention layouts.
     model.config.text_config.layer_types.reverse()
     model.config.save_pretrained(config.model)

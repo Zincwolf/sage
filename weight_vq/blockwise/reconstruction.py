@@ -27,7 +27,7 @@ class DistributedReconstruction:
         device = self.distributed.device
         with torch.autocast(device_type=device.type, dtype=dtype, enabled=dtype != torch.float32):
             error, count = self.validation.local_totals(
-                layer, device, self.config.reconstruction_microbatch_size
+                layer, device, self.config.reconstruction_microbatch_size, dtype=dtype
             )
         totals = torch.stack((error, error.new_tensor(count)))
         self.distributed.sum_(totals)
@@ -46,7 +46,8 @@ class DistributedReconstruction:
                 hidden = torch.zeros(1, self.train.inputs.shape[-1], device=device, dtype=dtype)
                 for expert in experts:
                     expert(hidden)
-            source = self.train.inputs[:1].to(device)
+            # Without autocast, retained dense projections require matching inputs.
+            source = self.train.inputs[:1].to(device=device, dtype=dtype)
             if not len(source):
                 source = torch.zeros((1, *self.train.inputs.shape[1:]), device=device, dtype=dtype)
             self.train.state.forward(layer, source)

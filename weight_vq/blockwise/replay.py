@@ -85,22 +85,32 @@ class LayerReplay:
     targets: torch.Tensor
 
     def loss_parts(
-        self, layer: nn.Module, indices: torch.Tensor, device: torch.device | str
+        self,
+        layer: nn.Module,
+        indices: torch.Tensor,
+        device: torch.device | str,
+        *,
+        dtype: torch.dtype | None = None,
     ) -> tuple[torch.Tensor, int]:
-        source = self.inputs[indices.to(self.inputs.device)].to(device)
+        source = self.inputs[indices.to(self.inputs.device)].to(device=device, dtype=dtype)
         target = self.targets[indices.to(self.targets.device)].to(device)
         difference = self.state.forward(layer, source).float() - target.float()
         return difference.square().sum(), difference.numel()
 
     @torch.no_grad()
     def local_totals(
-        self, layer: nn.Module, device: torch.device | str, microbatch_size: int
+        self,
+        layer: nn.Module,
+        device: torch.device | str,
+        microbatch_size: int,
+        *,
+        dtype: torch.dtype | None = None,
     ) -> tuple[torch.Tensor, int]:
         total = torch.zeros((), device=device, dtype=torch.float64)
         count = 0
         for start in range(0, len(self.inputs), microbatch_size):
             indices = torch.arange(start, min(start + microbatch_size, len(self.inputs)))
-            error, elements = self.loss_parts(layer, indices, device)
+            error, elements = self.loss_parts(layer, indices, device, dtype=dtype)
             total += error
             count += elements
         return total, count

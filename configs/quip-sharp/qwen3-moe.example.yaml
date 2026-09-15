@@ -34,4 +34,4 @@ reconstruction_epochs: 5
 learning_rate: 0.00005
 susv_learning_rate: 0.0005
 batch_size: 8
-gradient_checkpointing: true
+gradient_checkpointing: false

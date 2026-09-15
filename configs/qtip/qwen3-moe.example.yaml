@@ -42,4 +42,4 @@ learning_rate: 0.00005
 susv_learning_rate: 0.0005
 batch_size: 8
 train_lut: true
-gradient_checkpointing: true
+gradient_checkpointing: false

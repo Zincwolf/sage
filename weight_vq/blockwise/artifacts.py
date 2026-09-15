@@ -19,8 +19,7 @@ PROJECTIONS = (
 LINEAR_ATTENTION_PROJECTIONS = (
     ("linear_attn.in_proj_qkv", "in_qkv", "in", "col"),
     ("linear_attn.in_proj_z", "in_z", "in", "col"),
-    ("linear_attn.in_proj_b", "in_b", "in", "col"),
-    ("linear_attn.in_proj_a", "in_a", "in", "col"),
+    # Keep in_proj_a/b in floating point: they control recurrent decay and updates.
     ("linear_attn.out_proj", "out", "out", "row"),
 )
 HESSIAN_NAMES = ("qkv", "o", "up", "down")

@@ -38,4 +38,4 @@ batch_size: 4
 gradient_accumulation_steps: 2
 early_stop: 3
 # Recompute Linear activations during backward to reduce MoE reconstruction memory.
-gradient_checkpointing: true
+gradient_checkpointing: false
