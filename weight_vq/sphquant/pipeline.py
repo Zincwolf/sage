@@ -1,4 +1,4 @@
-"""SPHQuant stage adapters for dense Qwen3 and Qwen3-VL QDQ export."""
+"""SPHQuant stage adapters for dense Qwen3 QDQ export."""
 
 from __future__ import annotations
 
@@ -8,13 +8,11 @@ import sys
 from collections.abc import Generator
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Literal
 
 from weight_vq import utils
 from weight_vq.calibration import load_calibration_metadata
 from weight_vq.sphquant.config import SPHQuantConfig
 
-ModelFamily = Literal["qwen3", "qwen3_vl"]
 PROJECTIONS = (
     "self_attn.q_proj",
     "self_attn.k_proj",
@@ -41,15 +39,13 @@ def _physical_device(device: int) -> Generator[None, None, None]:
             os.environ["CUDA_VISIBLE_DEVICES"] = previous
 
 
-def _model_contract(model: Path) -> tuple[ModelFamily, int]:
+def _model_contract(model: Path) -> int:
     from transformers import AutoConfig
 
     hf_config = AutoConfig.from_pretrained(model, local_files_only=True, trust_remote_code=True)
-    if hf_config.model_type == "qwen3":
-        return "qwen3", int(hf_config.num_hidden_layers)
-    if hf_config.model_type == "qwen3_vl":
-        return "qwen3_vl", int(hf_config.text_config.num_hidden_layers)
-    raise ValueError(f"SPHQuant supports only qwen3 and qwen3_vl, got {hf_config.model_type!r}")
+    if hf_config.model_type != "qwen3":
+        raise ValueError(f"SPHQuant supports only qwen3, got {hf_config.model_type!r}")
+    return int(hf_config.num_hidden_layers)
 
 
 def _target_layers(config: SPHQuantConfig, model_layers: int) -> range:
@@ -65,7 +61,7 @@ def checkpoint_path(config: SPHQuantConfig, layer: int, projection: str) -> Path
 
 def missing_checkpoints(config: SPHQuantConfig, model_layers: int | None = None) -> list[Path]:
     if model_layers is None:
-        _, model_layers = _model_contract(config.model)
+        model_layers = _model_contract(config.model)
     return [
         checkpoint_path(config, layer, projection)
         for layer in _target_layers(config, model_layers)
@@ -77,34 +73,11 @@ def missing_checkpoints(config: SPHQuantConfig, model_layers: int | None = None)
 def optimize(config: SPHQuantConfig) -> None:
     if not 1 <= config.codebook_bits <= 8:
         raise ValueError("codebook_bits must be within [1, 8]")
-    family, model_layers = _model_contract(config.model)
+    model_layers = _model_contract(config.model)
     _target_layers(config, model_layers)
+    metadata = load_calibration_metadata(config.calibration)
 
-    if family == "qwen3":
-        metadata = load_calibration_metadata(config.calibration)
-        calibration_arguments: dict[str, object] = {
-            "datasets": ["wikitext2", "c4", "redpajama"],
-            "val_dataset": "pileval",
-            "train_size": metadata.train_samples,
-            "validation_size": metadata.validation_samples,
-            "seqlen": metadata.sequence_length,
-            "calibration_path": str(config.calibration),
-            "multimodal_calibration_path": None,
-            "model_dtype": "float16",
-        }
-    else:
-        calibration_arguments = {
-            "datasets": ["coco"],
-            "val_dataset": "coco",
-            "train_size": 1920,
-            "validation_size": 128,
-            "seqlen": 2048,
-            "calibration_path": None,
-            "multimodal_calibration_path": str(config.calibration),
-            "model_dtype": "bfloat16",
-        }
-
-    # This is the verified W2 recipe shared by the two supported model families.
+    # This is the verified Qwen3 W2 recipe.
     # Keep these constants at the ParoQuant boundary until experiments require variants.
     arguments = {
         "model": str(config.model),
@@ -121,7 +94,12 @@ def optimize(config: SPHQuantConfig) -> None:
         "n_bit": 2,
         "num_rotations": 0,
         "skipped_modules": [],
-        **calibration_arguments,
+        "datasets": ["wikitext2", "c4", "redpajama"],
+        "val_dataset": "pileval",
+        "train_size": metadata.train_samples,
+        "validation_size": metadata.validation_samples,
+        "seqlen": metadata.sequence_length,
+        "calibration_path": str(config.calibration),
         "batch_size": config.batch_size,
         "val_batch_size": config.batch_size,
         "gradient_accumulation_steps": config.gradient_accumulation_steps,
@@ -152,7 +130,7 @@ def optimize(config: SPHQuantConfig) -> None:
 
 
 def export(config: SPHQuantConfig) -> None:
-    _, model_layers = _model_contract(config.model)
+    model_layers = _model_contract(config.model)
     missing = missing_checkpoints(config, model_layers)
     if missing:
         preview = [str(path) for path in missing[:8]]
@@ -193,20 +171,18 @@ def export(config: SPHQuantConfig) -> None:
 
 def validate(config: SPHQuantConfig) -> None:
     """Load a dense artifact through the evaluation-facing HF API."""
-    family, model_layers = _model_contract(config.model)
+    model_layers = _model_contract(config.model)
     target_layers = _target_layers(config, model_layers)
     with _physical_device(config.device):
-        from transformers import AutoModelForCausalLM, AutoModelForImageTextToText
+        from transformers import AutoModelForCausalLM
 
-        model_loader = AutoModelForCausalLM if family == "qwen3" else AutoModelForImageTextToText
-        layer_prefix = "model.layers" if family == "qwen3" else "model.language_model.layers"
         utils.validate_dense_model(
             config.exported_model,
-            model_loader=model_loader,
+            model_loader=AutoModelForCausalLM,
             weights=lambda model: (
                 (name, model.get_parameter(f"{name}.weight"))
                 for index in target_layers
                 for projection in PROJECTIONS
-                for name in (f"{layer_prefix}.{index}.{projection}",)
+                for name in (f"model.layers.{index}.{projection}",)
             ),
         )

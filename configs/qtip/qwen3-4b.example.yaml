@@ -1,6 +1,5 @@
 # Qwen3 blockwise W2 migration: no E2E, plain-text RedPajama train documents.
 model: /path/to/Qwen3-4B-Instruct-2507
-# Existing HF datasets Arrow cache directory; no automatic downloads.
 dataset: /path/to/RedPajama/Arrows
 output_dir: /path/to/outputs/qtip/qwen3-4b-rp-blockwise
 

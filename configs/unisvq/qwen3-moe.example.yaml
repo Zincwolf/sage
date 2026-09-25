@@ -17,15 +17,15 @@ sequence_length: 4096
 
 # Resource controls: global sequences per chunk, physical microbatches,
 # and CPU replay storage. Smaller chunks increase statistics I/O.
-hessian_chunk_size: 64
-forward_microbatch_size: 1
-reconstruction_microbatch_size: 1
-replay_device: cpu
+hessian_chunk_size: 1024
+forward_microbatch_size: 32
+reconstruction_microbatch_size: 4
+replay_device: cuda
 
 # Expert tokens / original calibration tokens, without a top-k multiplier.
 # Research threshold: 0.0 falls back only for zero coverage; 0.005 means 0.5%.
 # Fallback uses an identity metric and retains identical W2 encoding.
-min_expert_coverage: 0.0
+min_expert_coverage: 0.01
 
 # Preserve the released 128-block Hadamard, LDLQ, and whole-block reconstruction.
 sigma_reg: 0.01
@@ -34,7 +34,7 @@ quip_tune_iters: 10
 reconstruction_epochs: 1
 learning_rate: 0.00005
 susv_learning_rate: 0.0005
-batch_size: 4
+batch_size: 16
 gradient_accumulation_steps: 2
 early_stop: 3
 # Recompute Linear activations during backward to reduce MoE reconstruction memory.

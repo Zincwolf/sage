@@ -1,0 +1,57 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Zincwolf <zincwolf@outlook.com>
+Date: Fri, 25 Sep 2026 16:43:15 +0800
+Subject: [PATCH] Use canonical WikiText dataset repository
+
+Keep the dataset compatibility fix separate from calibration infrastructure and SPHQuant. Exercise both training and validation requests without network access.
+---
+ paroquant/optim/util.py            |  2 +-
+ tests/test_calibration_datasets.py | 26 ++++++++++++++++++++++++++
+ 2 files changed, 27 insertions(+), 1 deletion(-)
+ create mode 100644 tests/test_calibration_datasets.py
+
+diff --git a/paroquant/optim/util.py b/paroquant/optim/util.py
+index 274cbc0..91b1bbd 100644
+--- a/paroquant/optim/util.py
++++ b/paroquant/optim/util.py
+@@ -155,7 +155,7 @@ def get_calib_dataset(
+         dataset = load_dataset("mit-han-lab/pile-val-backup", split="validation")
+         dataset = dataset.shuffle(seed=seed)
+     elif data == "wikitext2":
+-        dataset = load_dataset("wikitext", "wikitext-2-raw-v1", split=split)
++        dataset = load_dataset("Salesforce/wikitext", "wikitext-2-raw-v1", split=split)
+         dataset = dataset.shuffle(seed=seed)
+     elif data == "c4":
+         if split == "train":
+diff --git a/tests/test_calibration_datasets.py b/tests/test_calibration_datasets.py
+new file mode 100644
+index 0000000..d004ec7
+--- /dev/null
++++ b/tests/test_calibration_datasets.py
+@@ -0,0 +1,26 @@
++from types import SimpleNamespace
++
++import pytest
++import torch
++from datasets import Dataset
++
++from paroquant.optim import util
++
++
++@pytest.mark.parametrize("split", ["train", "validation"])
++def test_wikitext_uses_canonical_hub_repository(monkeypatch, split):
++    requests = []
++    dataset = Dataset.from_dict({"text": ["1 2 3 4", "5 6 7 8"]})
++
++    def load_dataset(*args, **kwargs):
++        requests.append((args, kwargs))
++        return dataset
++
++    monkeypatch.setattr(util, "load_dataset", load_dataset)
++    tokenizer = SimpleNamespace(encode=lambda text: [int(token) for token in text.split()])
++    samples = util.get_calib_dataset(
++        "wikitext2", tokenizer=tokenizer, n_samples=2, block_size=4, seed=0, split=split
++    )
++    assert requests == [(("Salesforce/wikitext", "wikitext-2-raw-v1"), {"split": split})]
++    assert len(samples) == 2
++    torch.testing.assert_close(torch.cat(samples).sort().values, torch.arange(1, 9))

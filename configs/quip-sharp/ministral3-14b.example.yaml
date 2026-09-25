@@ -1,0 +1,26 @@
+# QuIP# W2 E8P blockwise configuration for local Ministral 3 14B.
+model: /path/to/Ministral-3-14B-Instruct-2512-BF16
+dataset: /path/to/RedPajama/Arrows
+output_dir: /path/to/outputs/quip-sharp/ministral-3-14b-rp-blockwise
+devices: [0, 1, 2, 3]
+model_dtype: bfloat16
+seed: 0
+hessian_samples: 6144
+hessian_sequence_length: 2048
+train_samples: 256
+validation_samples: 128
+sequence_length: 2048
+hessian_chunk_size: 256
+forward_microbatch_size: 1
+reconstruction_microbatch_size: 1
+replay_device: cuda
+num_cpu_threads: 8
+sigma_reg: 0.01
+scale_override: 0.9
+quip_tune_iters: 10
+use_fp64: false
+reconstruction_epochs: 5
+learning_rate: 0.00005
+susv_learning_rate: 0.0005
+batch_size: 8
+gradient_checkpointing: false

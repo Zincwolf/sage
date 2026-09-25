@@ -15,15 +15,15 @@ sequence_length: 2048
 
 # Global sequence count per chunk; smaller chunks reduce activation memory
 # but increase reads/writes of the per-layer statistics on the output filesystem.
-hessian_chunk_size: 64
-forward_microbatch_size: 1
-reconstruction_microbatch_size: 1
-replay_device: cpu
+hessian_chunk_size: 6144
+forward_microbatch_size: 64
+reconstruction_microbatch_size: 16
+replay_device: cuda
 
 # Expert input tokens / original calibration tokens, without a top-k multiplier.
 # 0.0: only zero coverage falls back; 0.005 would mean a 0.5% threshold.
 # Fallback retains E8P encoding, using an identity metric.
-min_expert_coverage: 0.0
+min_expert_coverage: 0.01
 
 sigma_reg: 0.01
 scale_override: 0.9
@@ -33,5 +33,5 @@ use_fp64: false
 reconstruction_epochs: 5
 learning_rate: 0.00005
 susv_learning_rate: 0.0005
-batch_size: 8
+batch_size: 16
 gradient_checkpointing: false

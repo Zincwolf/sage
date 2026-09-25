@@ -1,0 +1,431 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Zincwolf <zincwolf@outlook.com>
+Date: Fri, 25 Sep 2026 16:41:22 +0800
+Subject: [PATCH] Support pretokenized text calibration and layer replay
+
+Load shared token artifacts with optional sample/layer limits. Capture per-batch decoder arguments on CPU, reuse shared tensors, and stop before the LM head. Restore layers and hooks on failure and move cached kwargs back to the training device.
+---
+ paroquant/cli/optimize.py      | 108 ++++++++++++++++++++++++---------
+ paroquant/optim/train.py       |   6 +-
+ paroquant/optim/util.py        |  83 +++++++++++++++++++------
+ tests/test_text_calibration.py | 108 +++++++++++++++++++++++++++++++++
+ 4 files changed, 253 insertions(+), 52 deletions(-)
+ create mode 100644 tests/test_text_calibration.py
+
+diff --git a/paroquant/cli/optimize.py b/paroquant/cli/optimize.py
+index 9469078..9ac9bbf 100644
+--- a/paroquant/cli/optimize.py
++++ b/paroquant/cli/optimize.py
+@@ -72,6 +72,9 @@ class Config:
+     # Increasing this reduces peak memory usage but increases training time.
+     gradient_accumulation_steps: int = 1
+     seqlen: int
++    calibration_path: str | None = None
++    calibration_limit: int | None = None
++    max_layers: int | None = None
+ 
+     # Number of shards to cache the input/output tensors. At any time, only one shard
+     # will be moved to GPU for optimization. The rest will be kept in CPU memory.
+@@ -135,29 +138,61 @@ def main():
+     # Load model.
+     model = load_model(args.model, device_map="cpu", dtype=torch.float16).half()
+     move_embed(model, device)
+-    tokenizer = load_tokenizer(args.model)
+     blocks = get_blocks(model)
+ 
+-    # Get calibration dataset.
+-    samples = get_mixed_calib_dataset(
+-        args.datasets,
+-        tokenizer=tokenizer,
+-        n_samples=args.train_size,
+-        block_size=args.seqlen,
+-        seed=args.seed,
+-        split="train",
+-    )
+-    samples = torch.stack(samples, dim=0).to(device)
+-
+-    val_samples = get_calib_dataset(
+-        args.val_dataset,
+-        tokenizer=tokenizer,
+-        n_samples=args.validation_size,
+-        block_size=args.seqlen,
+-        seed=args.seed,
+-        split="validation",
+-    )
+-    val_samples = torch.stack(val_samples, dim=0).to(device)
++    # Get calibration dataset. A pre-tokenized artifact makes all comparison
++    # methods consume byte-identical token sequences.
++    if args.calibration_path is not None:
++        calibration = torch.load(
++            args.calibration_path,
++            map_location="cpu",
++            weights_only=False,
++        )
++        samples = calibration["train"]
++        val_samples = calibration["validation"]
++        expected_train = (args.train_size, args.seqlen)
++        expected_val = (args.validation_size, args.seqlen)
++        if tuple(samples.shape) != expected_train:
++            raise ValueError(
++                f"Calibration train shape {tuple(samples.shape)} != "
++                f"{expected_train}"
++            )
++        if tuple(val_samples.shape) != expected_val:
++            raise ValueError(
++                f"Calibration validation shape {tuple(val_samples.shape)} != "
++                f"{expected_val}"
++            )
++        samples = samples.to(device)
++        val_samples = val_samples.to(device)
++        if args.calibration_limit is not None:
++            if args.calibration_limit <= 0:
++                raise ValueError("calibration_limit must be positive")
++            samples = samples[: args.calibration_limit]
++            val_samples = val_samples[: min(
++                args.calibration_limit,
++                val_samples.shape[0],
++            )]
++    else:
++        tokenizer = load_tokenizer(args.model)
++        samples = get_mixed_calib_dataset(
++            args.datasets,
++            tokenizer=tokenizer,
++            n_samples=args.train_size,
++            block_size=args.seqlen,
++            seed=args.seed,
++            split="train",
++        )
++        samples = torch.stack(samples, dim=0).to(device)
++
++        val_samples = get_calib_dataset(
++            args.val_dataset,
++            tokenizer=tokenizer,
++            n_samples=args.validation_size,
++            block_size=args.seqlen,
++            seed=args.seed,
++            split="validation",
++        )
++        val_samples = torch.stack(val_samples, dim=0).to(device)
+ 
+     # Capture per-batch positional args and layer kwargs.
+     logger.info("Capturing layer positional args and kwargs...")
+@@ -199,7 +234,7 @@ def main():
+         layer: nn.Module,
+         args_batched: list[tuple[torch.Tensor, ...]],
+         *,
+-        kwargs: dict,
++        kwargs: list[dict],
+         retained_kwargs_batches: list[dict],
+         store_device: torch.device | str,
+     ) -> list[torch.Tensor]:
+@@ -207,7 +242,7 @@ def main():
+ 
+         layer.to(device)
+         for batch_idx, args_batch in enumerate(args_batched):
+-            batch_kwargs = kwargs.copy()
++            batch_kwargs = to_device(kwargs[batch_idx], device)
+             for key in RETAINED_KWARG_KEYS:
+                 if key in retained_kwargs_batches[batch_idx]:
+                     batch_kwargs[key] = to_device(retained_kwargs_batches[batch_idx][key], device)
+@@ -264,6 +299,8 @@ def main():
+ 
+     # Layerwise, multi-stage optimization.
+     for layer_idx, layer in enumerate(tqdm(blocks)):
++        if args.max_layers is not None and layer_idx >= args.max_layers:
++            break
+         empty_cache()
+         logger.info(f"Capturing original layer output...")
+         # Original output of this layer.
+@@ -457,13 +494,28 @@ def main():
+                         pseudo_module.reset_angles_by_mask()
+ 
+             train_kwargs_batches = [
+-                kwargs_list[layer_idx] | {k: retained_kwargs[k] for k in RETAINED_KWARG_KEYS if k in retained_kwargs}
+-                for retained_kwargs in new_retained_kwargs_batches
++                kwargs_batch
++                | {
++                    key: retained_kwargs[key]
++                    for key in RETAINED_KWARG_KEYS
++                    if key in retained_kwargs
++                }
++                for kwargs_batch, retained_kwargs in zip(
++                    kwargs_list[layer_idx],
++                    new_retained_kwargs_batches,
++                )
+             ]
+             val_kwargs_batches = [
+-                val_kwargs_list[layer_idx]
+-                | {k: retained_kwargs[k] for k in RETAINED_KWARG_KEYS if k in retained_kwargs}
+-                for retained_kwargs in new_val_retained_kwargs_batches
++                kwargs_batch
++                | {
++                    key: retained_kwargs[key]
++                    for key in RETAINED_KWARG_KEYS
++                    if key in retained_kwargs
++                }
++                for kwargs_batch, retained_kwargs in zip(
++                    val_kwargs_list[layer_idx],
++                    new_val_retained_kwargs_batches,
++                )
+             ]
+ 
+             for step, step_params_dict in enumerate(params_to_optimize):
+diff --git a/paroquant/optim/train.py b/paroquant/optim/train.py
+index f04d86a..64197cc 100644
+--- a/paroquant/optim/train.py
++++ b/paroquant/optim/train.py
+@@ -10,7 +10,7 @@ import torch
+ import torch.nn as nn
+ from tqdm import tqdm
+ 
+-from .util import CosineAnnealingParam, RETAINED_KWARG_KEYS, logger, to_device
++from .util import CosineAnnealingParam, logger, to_device
+ 
+ 
+ def _get_independent_channel_pairs(
+@@ -140,9 +140,7 @@ def optimize_module(
+             batch_kwargs = {
+                 key: value.copy() if isinstance(value, dict) else value for key, value in kwargs[batch_idx].items()
+             }
+-            for key in RETAINED_KWARG_KEYS:
+-                if key in batch_kwargs:
+-                    batch_kwargs[key] = to_device(batch_kwargs[key], args[0].device)
++            batch_kwargs = to_device(batch_kwargs, args[0].device)
+         out = module(*args, **batch_kwargs)
+         if isinstance(out, tuple):
+             out = out[0]
+diff --git a/paroquant/optim/util.py b/paroquant/optim/util.py
+index b5b7d1a..274cbc0 100644
+--- a/paroquant/optim/util.py
++++ b/paroquant/optim/util.py
+@@ -220,12 +220,37 @@ def capture_layer_inputs_and_args(
+     layers: nn.ModuleList,
+     samples: torch.Tensor,
+     batch_size: int | None,
+-) -> tuple[list[torch.Tensor], list[dict], list[list[tuple[torch.Tensor, ...]]], list[dict]]:
++) -> tuple[
++    list[torch.Tensor],
++    list[list[dict]],
++    list[list[tuple[torch.Tensor, ...]]],
++    list[dict],
++]:
+     device = samples.device
+-    kwargs_list: list[dict] = [{} for _ in range(len(layers))]
++    batch_size = samples.shape[0] if batch_size is None or batch_size <= 0 else batch_size
++    if samples.shape[0] % batch_size:
++        raise ValueError(
++            f"Sample count {samples.shape[0]} must be divisible by batch size {batch_size}"
++        )
++    kwargs_batches_list: list[list[dict]] = [[] for _ in range(len(layers))]
+     first_layer_input_batches: list[torch.Tensor] = []
+     other_args_batches_list: list[list[tuple[torch.Tensor, ...]]] = [[] for _ in range(len(layers))]
+     retained_kwargs_batches: list[dict] = []
++    cpu_tensor_cache: dict[tuple[int, int], torch.Tensor] = {}
++
++    def to_cpu_cached(value, batch_idx: int):
++        if isinstance(value, torch.Tensor):
++            key = (batch_idx, id(value))
++            if key not in cpu_tensor_cache:
++                cpu_tensor_cache[key] = value.cpu()
++            return cpu_tensor_cache[key]
++        if isinstance(value, list):
++            return [to_cpu_cached(item, batch_idx) for item in value]
++        if isinstance(value, tuple):
++            return tuple(to_cpu_cached(item, batch_idx) for item in value)
++        if isinstance(value, dict):
++            return {key: to_cpu_cached(item, batch_idx) for key, item in value.items()}
++        return value
+ 
+     class Catcher(nn.Module):
+ 
+@@ -236,21 +261,28 @@ def capture_layer_inputs_and_args(
+             object.__setattr__(self, "layer_idx", layer_idx)
+ 
+         def forward(self, *args, **kwargs):
++            batch_idx = len(other_args_batches_list[self.layer_idx])
+             if self.layer_idx == 0:
+                 first_layer_input_batches.append(args[0].cpu())
+ 
+-            # Capture kwargs for all layers.
+-            layer_kwargs = kwargs_list[self.layer_idx]
+-            if len(layer_kwargs) == 0:
+-                layer_kwargs.update({k: v for k, v in kwargs.items() if k not in RETAINED_KWARG_KEYS})
+-                layer_kwargs.pop("use_cache", None)
+-                layer_kwargs.pop("past_key_value", None)
+-                layer_kwargs.pop("past_key_values", None)
++            layer_kwargs = {
++                key: to_cpu_cached(value, batch_idx)
++                for key, value in kwargs.items()
++                if key not in RETAINED_KWARG_KEYS
++            }
++            layer_kwargs.pop("use_cache", None)
++            layer_kwargs.pop("past_key_value", None)
++            layer_kwargs.pop("past_key_values", None)
++            kwargs_batches_list[self.layer_idx].append(layer_kwargs)
+ 
+             other_args_batches_list[self.layer_idx].append(
+-                tuple(arg.cpu() if isinstance(arg, torch.Tensor) else arg for arg in args[1:])
++                tuple(to_cpu_cached(arg, batch_idx) for arg in args[1:])
+             )
+-            retained_kwargs = {k: to_device(kwargs[k], "cpu") for k in RETAINED_KWARG_KEYS if k in kwargs}
++            retained_kwargs = {
++                key: to_cpu_cached(kwargs[key], batch_idx)
++                for key in RETAINED_KWARG_KEYS
++                if key in kwargs
++            }
+             if self.layer_idx == 0:
+                 retained_kwargs_batches.append(retained_kwargs)
+ 
+@@ -262,18 +294,29 @@ def capture_layer_inputs_and_args(
+     for layer_idx, layer in enumerate(layers):
+         layers[layer_idx] = Catcher(layer, layer_idx)
+ 
+-    batch_size = samples.shape[0] if batch_size is None or batch_size <= 0 else batch_size
+-    num_batches = samples.shape[0] // batch_size
+-    samples_batch = samples.chunk(num_batches)
+-    for samples in samples_batch:
+-        model(samples)
+-
+-    for layer_idx, layer in enumerate(layers):
+-        layers[layer_idx] = layer.module
++    # Stop at the backbone so calibration does not materialize unused logits.
++    class StopCaptureForward(Exception):
++        pass
++
++    def stop_after_backbone(_module, _args, _output):
++        raise StopCaptureForward
++
++    backbone = getattr(model, "model", model)
++    stop_hook = backbone.register_forward_hook(stop_after_backbone)
++    try:
++        for sample_batch in samples.split(batch_size):
++            try:
++                model(sample_batch, use_cache=False)
++            except StopCaptureForward:
++                pass
++    finally:
++        stop_hook.remove()
++        for layer_idx, layer in enumerate(layers):
++            layers[layer_idx] = layer.module
+ 
+     return (
+         first_layer_input_batches,
+-        kwargs_list,
++        kwargs_batches_list,
+         other_args_batches_list,
+         retained_kwargs_batches,
+     )
+diff --git a/tests/test_text_calibration.py b/tests/test_text_calibration.py
+new file mode 100644
+index 0000000..4638cdb
+--- /dev/null
++++ b/tests/test_text_calibration.py
+@@ -0,0 +1,108 @@
++import pytest
++import torch
++from transformers import Qwen3Config, Qwen3ForCausalLM
++
++from paroquant.optim.train import optimize_module
++from paroquant.optim.util import capture_layer_inputs_and_args
++
++
++@pytest.fixture
++def model():
++    return Qwen3ForCausalLM(
++        Qwen3Config(
++            vocab_size=64,
++            hidden_size=128,
++            intermediate_size=256,
++            num_hidden_layers=2,
++            num_attention_heads=4,
++            num_key_value_heads=2,
++            head_dim=32,
++        )
++    ).eval()
++
++
++@pytest.mark.parametrize("batch_size", [None, 1, 2])
++def test_text_capture_preserves_inputs_and_kwargs_without_logits(model, batch_size):
++    samples = torch.randint(0, 64, (4, 8))
++    layers = list(model.model.layers)
++
++    def reject_logits(*_args):
++        pytest.fail("calibration must stop before the LM head")
++
++    handle = model.lm_head.register_forward_pre_hook(reject_logits)
++    try:
++        inputs, kwargs, other_args, retained = capture_layer_inputs_and_args(
++            model, model.model.layers, samples, batch_size=batch_size
++        )
++    finally:
++        handle.remove()
++
++    torch.testing.assert_close(torch.cat(inputs), model.model.embed_tokens(samples))
++    num_batches = 4 // (batch_size or 4)
++    assert len(inputs) == num_batches
++    assert retained == [{} for _ in range(num_batches)]
++    assert all(len(layer_kwargs) == num_batches for layer_kwargs in kwargs)
++    assert all(not args for layer_args in other_args for args in layer_args)
++    for batch_idx in range(num_batches):
++        first = kwargs[0][batch_idx]
++        assert "use_cache" not in first
++        assert "past_key_values" not in first
++        assert first["position_ids"].shape[-1] == 8
++        cos, sin = first["position_embeddings"]
++        next_cos, next_sin = kwargs[1][batch_idx]["position_embeddings"]
++        assert cos is next_cos
++        assert sin is next_sin
++        assert cos.device.type == "cpu"
++    assert list(model.model.layers) == layers
++    assert not model.model._forward_hooks
++    assert model(samples, use_cache=False).logits.shape == (4, 8, 64)
++
++
++def test_text_capture_restores_layers_and_hook_after_failure(model):
++    layers = list(model.model.layers)
++
++    def fail_embedding(*_args):
++        raise RuntimeError("embedding failed")
++
++    handle = model.model.embed_tokens.register_forward_hook(fail_embedding)
++    try:
++        with pytest.raises(RuntimeError, match="embedding failed"):
++            capture_layer_inputs_and_args(
++                model, model.model.layers, torch.ones(2, 8, dtype=torch.long), batch_size=1
++            )
++    finally:
++        handle.remove()
++    assert list(model.model.layers) == layers
++    assert not model.model._forward_hooks
++
++
++@pytest.mark.skipif(not torch.cuda.is_available(), reason="layer replay training uses CUDA")
++def test_training_moves_nested_cached_kwargs_to_input_device():
++    class OffsetLinear(torch.nn.Linear):
++        def forward(self, inputs, *, context):
++            offset = context[0]["offset"]
++            assert offset.device == inputs.device
++            return super().forward(inputs) + offset
++
++    module = OffsetLinear(1, 1, bias=False).cuda()
++    torch.nn.init.zeros_(module.weight)
++    inputs = [(torch.ones(1, 1, device="cuda"),) for _ in range(2)]
++    outputs = [torch.full((1, 1), 0.2, device="cuda") for _ in range(2)]
++    kwargs = [
++        {"context": ({"offset": torch.tensor([[0.05 * index]])},)}
++        for index in range(2)
++    ]
++    steps = optimize_module(
++        module,
++        (inputs, outputs),
++        (inputs, outputs),
++        kwargs,
++        kwargs,
++        [{"params": module.parameters(), "lr": 0.01}],
++        loss_fn="mse",
++        n_iter=1,
++        early_stop=None,
++    )
++    assert steps == 2
++    assert module.weight.item() > 0
++    assert all(batch["context"][0]["offset"].device.type == "cpu" for batch in kwargs)

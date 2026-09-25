@@ -21,13 +21,10 @@ from weight_vq.sphquant.pipeline import (
 )
 
 
-def smoke_config(tmp_path: Path, family: str = "qwen3_vl") -> SPHQuantConfig:
-    vlm = family == "qwen3_vl"
+def smoke_config(tmp_path: Path) -> SPHQuantConfig:
     return SPHQuantConfig(
-        model=Path("/models/Qwen3-VL-8B-Instruct" if vlm else "/models/Qwen3-4B-Instruct-2507"),
-        calibration=Path(
-            "/data/coco_calibration_manifest.json" if vlm else "outputs/calibration.pt"
-        ),
+        model=Path("/models/Qwen3-4B-Instruct-2507"),
+        calibration=Path("outputs/calibration.pt"),
         output_dir=tmp_path,
         device=3,
         sample_size=512,
@@ -47,31 +44,10 @@ def create_checkpoints(config: SPHQuantConfig) -> None:
         path.touch()
 
 
-def install_fake_optimizer(
-    monkeypatch: pytest.MonkeyPatch,
-) -> tuple[list[tuple[dict[str, object], str | None]], object]:
-    parsed: list[tuple[dict[str, object], str | None]] = []
-    reference_parse = object()
-    fake_module = ModuleType("paroquant.cli.optimize")
-    fake_module.Config = lambda **kwargs: kwargs  # type: ignore[attr-defined]
-    fake_module.simple_parsing = SimpleNamespace(parse=reference_parse)  # type: ignore[attr-defined]
-    fake_module.main = lambda: parsed.append(  # type: ignore[attr-defined]
-        (fake_module.simple_parsing.parse(), os.environ.get("CUDA_VISIBLE_DEVICES"))
-    )
-    fake_cli = ModuleType("paroquant.cli")
-    fake_cli.optimize = fake_module  # type: ignore[attr-defined]
-    monkeypatch.setitem(sys.modules, "paroquant", ModuleType("paroquant"))
-    monkeypatch.setitem(sys.modules, "paroquant.cli", fake_cli)
-    monkeypatch.setitem(sys.modules, "paroquant.cli.optimize", fake_module)
-    return parsed, reference_parse
-
-
-def test_model_contract_accepts_only_qwen3_and_qwen3_vl(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_model_contract_accepts_only_qwen3(monkeypatch: pytest.MonkeyPatch) -> None:
     configs = {
         "text": SimpleNamespace(model_type="qwen3", num_hidden_layers=36),
-        "vlm": SimpleNamespace(
-            model_type="qwen3_vl", text_config=SimpleNamespace(num_hidden_layers=40)
-        ),
+        "retired_vl": SimpleNamespace(model_type="qwen3_vl"),
         "other": SimpleNamespace(model_type="llama"),
     }
 
@@ -85,61 +61,55 @@ def test_model_contract_accepts_only_qwen3_and_qwen3_vl(monkeypatch: pytest.Monk
     fake_transformers.AutoConfig = AutoConfig  # type: ignore[attr-defined]
     monkeypatch.setitem(sys.modules, "transformers", fake_transformers)
 
-    assert _model_contract(Path("text")) == ("qwen3", 36)
-    assert _model_contract(Path("vlm")) == ("qwen3_vl", 40)
-    with pytest.raises(ValueError, match="supports only qwen3 and qwen3_vl"):
-        _model_contract(Path("other"))
+    assert _model_contract(Path("text")) == 36
+    for name in ("retired_vl", "other"):
+        with pytest.raises(ValueError, match="supports only qwen3, got"):
+            _model_contract(Path(name))
 
 
 def test_optimize_preserves_qwen3_text_recipe(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    parsed, reference_parse = install_fake_optimizer(monkeypatch)
-    monkeypatch.setattr("weight_vq.sphquant.pipeline._model_contract", lambda _model: ("qwen3", 36))
+    parsed: list[tuple[dict[str, object], str | None]] = []
+    reference_parse = object()
+    fake_module = ModuleType("paroquant.cli.optimize")
+    fake_module.Config = lambda **kwargs: kwargs  # type: ignore[attr-defined]
+    fake_module.simple_parsing = SimpleNamespace(parse=reference_parse)  # type: ignore[attr-defined]
+    fake_module.main = lambda: parsed.append(  # type: ignore[attr-defined]
+        (fake_module.simple_parsing.parse(), os.environ.get("CUDA_VISIBLE_DEVICES"))
+    )
+    fake_cli = ModuleType("paroquant.cli")
+    fake_cli.optimize = fake_module  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "paroquant", ModuleType("paroquant"))
+    monkeypatch.setitem(sys.modules, "paroquant.cli", fake_cli)
+    monkeypatch.setitem(sys.modules, "paroquant.cli.optimize", fake_module)
+    monkeypatch.setattr("weight_vq.sphquant.pipeline._model_contract", lambda _model: 36)
     monkeypatch.setattr(
         "weight_vq.sphquant.pipeline.load_calibration_metadata",
         lambda _path: CalibrationMetadata(1920, 128, 2048),
     )
     monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "8")
 
-    optimize(smoke_config(tmp_path, "qwen3"))
-
-    arguments, device = parsed[0]
-    assert arguments["datasets"] == ["wikitext2", "c4", "redpajama"]
-    assert arguments["val_dataset"] == "pileval"
-    assert arguments["calibration_path"] == "outputs/calibration.pt"
-    assert arguments["multimodal_calibration_path"] is None
-    assert arguments["model_dtype"] == "float16"
-    assert arguments["train_size"] == 1920
-    assert arguments["validation_size"] == 128
-    assert arguments["seqlen"] == 2048
-    assert device == "3"
-    assert os.environ["CUDA_VISIBLE_DEVICES"] == "8"
-    assert sys.modules["paroquant.cli.optimize"].simple_parsing.parse is reference_parse  # type: ignore[attr-defined]
-
-
-def test_optimize_maps_qwen3_vl_recipe(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    parsed, _ = install_fake_optimizer(monkeypatch)
-    monkeypatch.setattr(
-        "weight_vq.sphquant.pipeline._model_contract", lambda _model: ("qwen3_vl", 36)
-    )
-
     optimize(smoke_config(tmp_path))
 
     arguments, device = parsed[0]
     assert arguments["method"] == "sphquant"
     assert arguments["params"] == ["radius:0.001,codebook:0.001"]
-    assert arguments["datasets"] == ["coco"]
+    assert arguments["datasets"] == ["wikitext2", "c4", "redpajama"]
+    assert arguments["val_dataset"] == "pileval"
+    assert arguments["calibration_path"] == "outputs/calibration.pt"
+    assert "multimodal_calibration_path" not in arguments
+    assert "model_dtype" not in arguments
     assert arguments["train_size"] == 1920
     assert arguments["validation_size"] == 128
-    assert arguments["calibration_path"] is None
-    assert arguments["multimodal_calibration_path"] == ("/data/coco_calibration_manifest.json")
-    assert arguments["model_dtype"] == "bfloat16"
+    assert arguments["seqlen"] == 2048
     assert arguments["output_dir"] == str(tmp_path / "checkpoints")
     assert arguments["sph_sample_size"] == 512
     assert arguments["sph_kmeans_iterations"] == 2
     assert arguments["sph_codebook_bits"] == 8
     assert device == "3"
+    assert os.environ["CUDA_VISIBLE_DEVICES"] == "8"
+    assert sys.modules["paroquant.cli.optimize"].simple_parsing.parse is reference_parse  # type: ignore[attr-defined]
 
 
 def test_missing_checkpoints_uses_model_layer_count(tmp_path: Path) -> None:
@@ -154,9 +124,7 @@ def test_missing_checkpoints_uses_model_layer_count(tmp_path: Path) -> None:
 def test_export_rejects_incomplete_checkpoints(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    monkeypatch.setattr(
-        "weight_vq.sphquant.pipeline._model_contract", lambda _model: ("qwen3_vl", 36)
-    )
+    monkeypatch.setattr("weight_vq.sphquant.pipeline._model_contract", lambda _model: 36)
     with pytest.raises(FileNotFoundError, match="missing 7 SPHQuant checkpoints"):
         export(smoke_config(tmp_path))
 
@@ -179,10 +147,10 @@ def test_export_runs_shared_converter_in_staging_directory(
     monkeypatch.setitem(sys.modules, "paroquant", ModuleType("paroquant"))
     monkeypatch.setitem(sys.modules, "paroquant.cli", fake_cli)
     monkeypatch.setitem(sys.modules, "paroquant.cli.convert", fake_converter)
-    monkeypatch.setattr("weight_vq.sphquant.pipeline._model_contract", lambda _model: ("qwen3", 36))
+    monkeypatch.setattr("weight_vq.sphquant.pipeline._model_contract", lambda _model: 36)
     original_argv = sys.argv
 
-    config = smoke_config(tmp_path, "qwen3")
+    config = smoke_config(tmp_path)
     create_checkpoints(config)
     export(config)
 
@@ -202,66 +170,36 @@ def test_export_runs_shared_converter_in_staging_directory(
     assert sys.argv is original_argv
 
 
-class TextModel(nn.Module):
-    def __init__(self) -> None:
-        super().__init__()
-        self.model = nn.Module()
-        layer = nn.Module()
-        layer.self_attn = nn.Module()
-        layer.mlp = nn.Module()
-        for projection in PROJECTIONS:
-            parent, name = projection.split(".")
-            layer.get_submodule(parent).add_module(name, nn.Linear(2, 2, bias=False))
-        self.model.layers = nn.ModuleList([layer])
-
-
-class VLMModel(TextModel):
-    def __init__(self) -> None:
-        super().__init__()
-        backbone = self.model
-        self.model = nn.Module()
-        self.model.language_model = backbone
-
-
-@pytest.mark.parametrize(
-    ("family", "model_class", "expected_prefix"),
-    [("qwen3", TextModel, "model.layers"), ("qwen3_vl", VLMModel, "model.language_model.layers")],
-)
-def test_validate_uses_family_hf_api_and_target_statistics(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-    capsys: pytest.CaptureFixture[str],
-    family: str,
-    model_class: type[TextModel] | type[VLMModel],
-    expected_prefix: str,
+def test_validate_uses_causal_hf_api_and_target_statistics(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    loads: list[tuple[str, Path, dict[str, Any], str | None]] = []
+    model = nn.Module()
+    model.model = nn.Module()
+    layer = nn.Module()
+    layer.self_attn = nn.Module()
+    layer.mlp = nn.Module()
+    for projection in PROJECTIONS:
+        parent, name = projection.split(".")
+        layer.get_submodule(parent).add_module(name, nn.Linear(2, 2, bias=False))
+    model.model.layers = nn.ModuleList([layer])
+    loads: list[tuple[Path, dict[str, Any], str | None]] = []
 
     class AutoCausal:
         @staticmethod
         def from_pretrained(path: Path, **kwargs: Any) -> object:
-            loads.append(("causal", path, kwargs, os.environ.get("CUDA_VISIBLE_DEVICES")))
-            return model_class()
-
-    class AutoVLM:
-        @staticmethod
-        def from_pretrained(path: Path, **kwargs: Any) -> object:
-            loads.append(("vlm", path, kwargs, os.environ.get("CUDA_VISIBLE_DEVICES")))
-            return model_class()
+            loads.append((path, kwargs, os.environ.get("CUDA_VISIBLE_DEVICES")))
+            return model
 
     fake_transformers = ModuleType("transformers")
     fake_transformers.AutoModelForCausalLM = AutoCausal  # type: ignore[attr-defined]
-    fake_transformers.AutoModelForImageTextToText = AutoVLM  # type: ignore[attr-defined]
     monkeypatch.setitem(sys.modules, "transformers", fake_transformers)
-    monkeypatch.setattr("weight_vq.sphquant.pipeline._model_contract", lambda _model: (family, 36))
+    monkeypatch.setattr("weight_vq.sphquant.pipeline._model_contract", lambda _model: 36)
 
-    config = smoke_config(tmp_path, family)
+    config = smoke_config(tmp_path)
     validate(config)
 
-    expected_loader = "causal" if family == "qwen3" else "vlm"
     assert loads == [
         (
-            expected_loader,
             config.exported_model,
             {
                 "dtype": "auto",
@@ -275,5 +213,5 @@ def test_validate_uses_family_hf_api_and_target_statistics(
     ]
     rows = list(csv.reader(capsys.readouterr().out.splitlines()))
     assert len(rows) == 1 + len(PROJECTIONS)
-    assert rows[1][0] == f"{expected_prefix}.0.self_attn.q_proj"
-    assert rows[-1][0] == f"{expected_prefix}.0.mlp.down_proj"
+    assert rows[1][0] == "model.layers.0.self_attn.q_proj"
+    assert rows[-1][0] == "model.layers.0.mlp.down_proj"

@@ -31,16 +31,6 @@ class CalibrationConfig:
 
 
 @dataclass(frozen=True)
-class VLMCalibrationConfig:
-    """ShareGPT4V/COCO calibration manifest generation configuration."""
-
-    output_dir: Path
-    workers: int = 32
-    image_archive: Path | None = None
-    force: bool = False
-
-
-@dataclass(frozen=True)
 class CalibrationMetadata:
     train_samples: int
     validation_samples: int

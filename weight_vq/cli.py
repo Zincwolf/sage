@@ -9,9 +9,9 @@ from typing import Any
 
 from jsonargparse import ArgumentParser, Namespace
 
-from weight_vq import calibration, vlm_calibration
+from weight_vq import calibration
 from weight_vq.blockwise import pipeline as blockwise_pipeline
-from weight_vq.config import CalibrationConfig, VLMCalibrationConfig
+from weight_vq.config import CalibrationConfig
 from weight_vq.qtip.config import QTIPConfig
 from weight_vq.quip_sharp.config import QuIPSharpConfig
 from weight_vq.sphquant import pipeline as sphquant_pipeline
@@ -33,7 +33,6 @@ STAGES: dict[tuple[str, str], tuple[Stage, ConfigType]] = {
 STAGES.update(
     {
         ("data", "calibration"): (calibration.main, CalibrationConfig),
-        ("data", "vlm-calibration"): (vlm_calibration.main, VLMCalibrationConfig),
         ("sphquant", "optimize"): (sphquant_pipeline.optimize, SPHQuantConfig),
         ("sphquant", "export"): (sphquant_pipeline.export, SPHQuantConfig),
         ("sphquant", "validate"): (sphquant_pipeline.validate, SPHQuantConfig),

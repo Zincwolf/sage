@@ -1,4 +1,3 @@
-# Qwen3.5 VL wrapper; text calibration and native language projections only.
 model: /path/to/Qwen3.5-4B
 dataset: /path/to/RedPajama/Arrows
 output_dir: /path/to/outputs/qtip/qwen3.5-4b
