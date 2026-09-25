@@ -1,0 +1,945 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Zincwolf <zincwolf@outlook.com>
+Date: Fri, 25 Sep 2026 17:30:41 +0800
+Subject: [PATCH] Add SAGE ESG and ABS with FP16-grid QDQ
+
+---
+ paroquant/cli/convert.py      |   5 +-
+ paroquant/cli/optimize.py     |  80 +++++++++++--
+ paroquant/optim/sagelinear.py | 102 +++++++++++++++++
+ paroquant/optim/sphlinear.py  | 103 +++++++++++++----
+ tests/test_sagelinear.py      | 208 ++++++++++++++++++++++++++++++++++
+ tests/test_sph_optimize.py    | 117 ++++++++++++++++---
+ tests/test_sphconvert.py      |  44 ++++---
+ 7 files changed, 596 insertions(+), 63 deletions(-)
+ create mode 100644 paroquant/optim/sagelinear.py
+ create mode 100644 tests/test_sagelinear.py
+
+diff --git a/paroquant/cli/convert.py b/paroquant/cli/convert.py
+index 676a3dc..82ed0b0 100644
+--- a/paroquant/cli/convert.py
++++ b/paroquant/cli/convert.py
+@@ -207,6 +207,7 @@ def _to_awq_buffers(
+ @torch.no_grad()
+ def _convert_pseudo(model: torch.nn.Module, result_dir: Path) -> int:
+     from paroquant.optim.sphlinear import SPHPseudoQuantizedLinear
++    from paroquant.optim.sagelinear import SAGEPseudoQuantizedLinear
+ 
+     first_checkpoint = next(iter(sorted(result_dir.glob("*.pt"))), None)
+     sph_mode = False
+@@ -235,7 +236,9 @@ def _convert_pseudo(model: torch.nn.Module, result_dir: Path) -> int:
+                 continue
+             sd = torch.load(pt_file, weights_only=False, map_location="cuda")
+             if isinstance(module, torch.nn.Linear):
+-                if "sphquant_version" in sd:
++                if "sage_version" in sd:
++                    qlinear = SAGEPseudoQuantizedLinear.from_state_dict(sd)
++                elif "sphquant_version" in sd:
+                     qlinear = SPHPseudoQuantizedLinear.from_state_dict(sd)
+                 else:
+                     from paroquant.optim.qlinear import PseudoQuantizedLinear
+diff --git a/paroquant/cli/optimize.py b/paroquant/cli/optimize.py
+index bf3d4ee..fd01d54 100644
+--- a/paroquant/cli/optimize.py
++++ b/paroquant/cli/optimize.py
+@@ -3,6 +3,7 @@ from __future__ import annotations
+ import json
+ from copy import deepcopy
+ from dataclasses import dataclass, field
++from functools import partial
+ from pathlib import Path
+ from typing import Literal
+ 
+@@ -14,6 +15,7 @@ from tqdm import tqdm
+ 
+ from paroquant.optim.train import optimize_module
+ from paroquant.optim.sphlinear import SPHPseudoQuantizedLinear
++from paroquant.optim.sagelinear import SAGEPseudoQuantizedLinear
+ from paroquant.optim.util import (
+     set_module_by_name,
+     load_model,
+@@ -42,7 +44,7 @@ class Config:
+     # The number of epochs for each stage of optimization,
+     # e.g., --epochs 10 10
+     epochs: list[int]
+-    method: Literal["paroquant", "sphquant"] = "paroquant"
++    method: Literal["paroquant", "sphquant", "sage"] = "paroquant"
+ 
+     weight_decay: float = 0.01
+     betas: tuple[float, float] = (0.9, 0.95)
+@@ -79,6 +81,9 @@ class Config:
+     sph_sample_size: int = 65536
+     sph_kmeans_iterations: int = 20
+     sph_codebook_bits: int = 6
++    sage_esg: bool = True
++    sage_adaptive_bits: bool = True
++    sage_energy_power: float = 0.75
+ 
+     # Number of shards to cache the input/output tensors. At any time, only one shard
+     # will be moved to GPU for optimization. The rest will be kept in CPU memory.
+@@ -320,13 +325,41 @@ def main():
+             og_layer_val_input_batches,
+             val_other_args_batches_list[layer_idx],
+         )
+-        og_layer_output_batches = forward_layer_batch(
+-            layer,
+-            og_layer_args_batches,
+-            kwargs=kwargs_list[layer_idx],
+-            retained_kwargs_batches=og_retained_kwargs_batches,
+-            store_device="cpu",
+-        )
++        # ESG and ABS measure the original teacher, never the quantized student
++        # or held-out validation data. Collect during the existing target pass.
++        energy_statistics: dict[str, tuple[torch.Tensor, int]] = {}
++
++        def collect_energy(name, _module, inputs, _output):
++            x = inputs[0].detach().reshape(-1, inputs[0].shape[-1]).float()
++            energy_sum = x.square().sum(dim=0)
++            if name in energy_statistics:
++                previous, count = energy_statistics[name]
++                energy_statistics[name] = (previous + energy_sum, count + x.shape[0])
++            else:
++                energy_statistics[name] = (energy_sum, x.shape[0])
++
++        handles = []
++        if args.method == "sage" and (args.sage_esg or args.sage_adaptive_bits):
++            for name, module in get_named_linears(layer).items():
++                if name not in args.skipped_modules:
++                    handles.append(module.register_forward_hook(partial(collect_energy, name)))
++        try:
++            og_layer_output_batches = forward_layer_batch(
++                layer,
++                og_layer_args_batches,
++                kwargs=kwargs_list[layer_idx],
++                retained_kwargs_batches=og_retained_kwargs_batches,
++                store_device="cpu",
++            )
++        finally:
++            for handle in handles:
++                handle.remove()
++        channel_energy = {
++            name: (energy / count).cpu()
++            for name, (energy, count) in energy_statistics.items()
++            if count
++        }
++        del energy_statistics
+         og_layer_val_output_batches = forward_layer_batch(
+             layer,
+             og_layer_val_args_batches,
+@@ -363,7 +396,7 @@ def main():
+ 
+         linear_modules = get_named_linears(layer)
+         # Keep ParoQuant's compiled-kernel imports out of the SPHQuant path.
+-        if args.method == "sphquant":
++        if args.method in ("sphquant", "sage"):
+             expert_modules = {}
+         else:
+             from paroquant.optim.qexperts import get_named_moe_experts
+@@ -396,6 +429,7 @@ def main():
+         logger.info(f"Skipped MoE expert modules: {skipped_expert_names}")
+ 
+         named_pseudo_modules: dict[str, nn.Module] = {}
++        format_plan = {}
+         for name, old_module in optim_modules.items():
+             if name in args.skipped_modules:
+                 continue
+@@ -404,7 +438,9 @@ def main():
+                 existing_result_file = output_dir / f"{layer_idx}.{name}.pt"
+                 sd = torch.load(existing_result_file, map_location=device)
+                 if isinstance(old_module, nn.Linear):
+-                    if args.method == "sphquant":
++                    if args.method == "sage":
++                        new_module = SAGEPseudoQuantizedLinear.from_state_dict(sd)
++                    elif args.method == "sphquant":
+                         new_module = SPHPseudoQuantizedLinear.from_state_dict(
+                             sd,
+                             codebook_bits=args.sph_codebook_bits,
+@@ -431,7 +467,24 @@ def main():
+ 
+             old_module.to(device)
+             if isinstance(old_module, nn.Linear):
+-                if args.method == "sphquant":
++                if args.method == "sage":
++                    new_module = SAGEPseudoQuantizedLinear(
++                        old_module,
++                        channel_energy=channel_energy.get(name),
++                        esg=args.sage_esg,
++                        adaptive_bits=args.sage_adaptive_bits,
++                        energy_power=args.sage_energy_power,
++                        sample_size=args.sph_sample_size,
++                        kmeans_iterations=args.sph_kmeans_iterations,
++                        codebook_bits=args.sph_codebook_bits,
++                        seed=args.seed + layer_idx,
++                    )
++                    format_plan[name] = {
++                        "codebook_bits": 10 - int(new_module.radius_bits),
++                        "radius_bits": int(new_module.radius_bits),
++                        "candidate_errors": new_module.candidate_errors,
++                    }
++                elif args.method == "sphquant":
+                     new_module = SPHPseudoQuantizedLinear(
+                         old_module,
+                         sample_size=args.sph_sample_size,
+@@ -512,6 +565,11 @@ def main():
+             old_module.cpu()
+ 
+         if not all_files_exist:
++            if args.method == "sage":
++                (output_dir / f"{layer_idx}.format.json").write_text(
++                    json.dumps(format_plan, indent=2) + "\n"
++                )
++            del channel_energy
+             layer.to(device).float()
+ 
+             set_checkpointing_enabled(named_pseudo_modules, args.checkpointing)
+diff --git a/paroquant/optim/sagelinear.py b/paroquant/optim/sagelinear.py
+new file mode 100644
+index 0000000..1eccdbe
+--- /dev/null
++++ b/paroquant/optim/sagelinear.py
+@@ -0,0 +1,102 @@
++"""SAGE: energy-stratified grouping and adaptive direction/radius bit splits."""
++
++from __future__ import annotations
++
++import torch
++from torch import nn
++
++from paroquant.optim.sphlinear import (
++    DEFAULT_CODEBOOK_BITS,
++    GROUP_SIZE,
++    INDEX_AND_RADIUS_BITS,
++    VECTOR_SIZE,
++    SPHPseudoQuantizedLinear,
++    initialize_spherical_weight,
++    materialize_spherical_weight,
++)
++
++SAGE_CODEBOOK_BITS = (6, 7, 8)
++
++
++class SAGEPseudoQuantizedLinear(SPHPseudoQuantizedLinear):
++    def __init__(
++        self,
++        linear: nn.Linear,
++        *,
++        channel_energy: torch.Tensor | None = None,
++        esg: bool = True,
++        adaptive_bits: bool = True,
++        energy_power: float = 0.75,
++        sample_size: int = 65536,
++        kmeans_iterations: int = 20,
++        codebook_bits: int = DEFAULT_CODEBOOK_BITS,
++        seed: int = 0,
++        initialized: dict[str, torch.Tensor] | None = None,
++    ) -> None:
++        # Only initialization needs calibration energies and candidate scores. The
++        # trained representation has the same spherical state plus a permutation.
++        candidate_errors: dict[int, float] = {}
++        if initialized is None:
++            if (esg or adaptive_bits) and channel_energy is None:
++                raise ValueError("SAGE ESG/ABS requires teacher input-channel energies")
++            with torch.no_grad():
++                weight = linear.weight.detach().float()
++                energy = (
++                    None if channel_energy is None else channel_energy.to(weight.device).float()
++                )
++                order = torch.arange(weight.shape[1], device=weight.device)
++                position_weights = None
++                if esg:
++                    # One channel from each of eight energy tiers per subvector.
++                    order = energy.argsort(descending=True).reshape(VECTOR_SIZE, -1).T.flatten()
++                    weight = weight[:, order]
++                    energy = energy[order]
++                    tempered = energy.reshape(-1, VECTOR_SIZE).pow(energy_power)
++                    mean = tempered.mean(dim=1, keepdim=True)
++                    position_weights = torch.where(
++                        mean > 0, tempered / mean.clamp_min(1e-12), torch.ones_like(tempered)
++                    ).repeat(weight.shape[0], 1)
++
++                # ABS scores with raw energy, not the tempered/normalized fit weights.
++                # Its candidates use the actual FP16-grid reconstruction, including
++                # angle/logit conversion. Retain the winner rather than refitting it.
++                candidates = SAGE_CODEBOOK_BITS if adaptive_bits else (codebook_bits,)
++                best_error = float("inf")
++                for bits in candidates:
++                    candidate = initialize_spherical_weight(
++                        weight,
++                        sample_size=sample_size,
++                        kmeans_iterations=kmeans_iterations,
++                        codebook_bits=bits,
++                        seed=seed,
++                        position_weights=position_weights,
++                    )
++                    if adaptive_bits:
++                        reconstructed = materialize_spherical_weight(
++                            **candidate,
++                            radius_bits=INDEX_AND_RADIUS_BITS - bits,
++                            group_size=GROUP_SIZE,
++                        )
++                        reference = (weight.square() * energy).sum()
++                        error = float(
++                            ((weight - reconstructed).square() * energy).sum()
++                            / reference.clamp_min(1e-30)
++                        )
++                        candidate_errors[bits] = error
++                        del reconstructed
++                    else:
++                        error = 0.0
++                    if initialized is None or error < best_error:
++                        best_error = error
++                        initialized = candidate
++                        codebook_bits = bits
++                initialized["channel_unpermutation"] = order.argsort()
++
++        super().__init__(linear, codebook_bits=codebook_bits, initialized=initialized)
++        self.register_buffer("channel_unpermutation", initialized["channel_unpermutation"])
++        self.register_buffer("sage_version", torch.tensor(1, dtype=torch.int32))
++        self.candidate_errors = candidate_errors
++
++    def materialized_weight(self) -> torch.Tensor:
++        # Dense QDQ absorbs ESG into the weights; no activation transform remains.
++        return super().materialized_weight()[:, self.channel_unpermutation]
+diff --git a/paroquant/optim/sphlinear.py b/paroquant/optim/sphlinear.py
+index 9771f43..8cc0df1 100644
+--- a/paroquant/optim/sphlinear.py
++++ b/paroquant/optim/sphlinear.py
+@@ -77,12 +77,16 @@ def radius_fake_quantize(
+     maximum = detached.amax(dim=-1, keepdim=True)
+     levels = (1 << bits) - 1
+     scale = (maximum - minimum) / levels
++    # The deployed grid stores offset and step in FP16, not the extrema.
++    # Choose codes and reconstruct against that same rounded grid in every path.
++    minimum = minimum.to(torch.float16).float()
++    scale = scale.to(torch.float16).float()
+     safe_scale = torch.where(scale > 0, scale, torch.ones_like(scale))
+     codes = torch.round((detached - minimum) / safe_scale).clamp(0, levels)
+     dequantized = minimum + codes * safe_scale
+     dequantized = torch.where(scale > 0, dequantized, minimum)
+     dequantized = dequantized.reshape_as(radius)
+-    return radius + (dequantized - radius).detach()
++    return dequantized + (radius - radius.detach())
+ 
+ 
+ @torch.no_grad()
+@@ -105,6 +109,37 @@ def assign_directions(
+     return assignments
+ 
+ 
++@torch.no_grad()
++def assign_directions_weighted(
++    positive: torch.Tensor,
++    codebook: torch.Tensor,
++    weights: torch.Tensor,
++    *,
++    chunk_size: int = 32768,
++) -> torch.Tensor:
++    """Minimize weighted error after fitting a continuous radius per codeword."""
++    assignments = torch.empty(positive.shape[0], dtype=torch.long, device=positive.device)
++    transposed = codebook.float().T
++    squared = codebook.float().square().T
++    for start in range(0, positive.shape[0], chunk_size):
++        end = start + chunk_size
++        block_weights = weights[start:end].float()
++        numerator = ((block_weights * positive[start:end].float()) @ transposed).square()
++        denominator = (block_weights @ squared).clamp_min(1e-12)
++        assignments[start:end] = (numerator / denominator).argmax(dim=1)
++    return assignments
++
++
++def weighted_ls_radius(
++    positive: torch.Tensor,
++    selected: torch.Tensor,
++    weights: torch.Tensor,
++) -> torch.Tensor:
++    numerator = (weights * positive * selected).sum(dim=1)
++    denominator = (weights * selected.square()).sum(dim=1).clamp_min(1e-12)
++    return numerator / denominator
++
++
+ @torch.no_grad()
+ def spherical_kmeans(
+     directions: torch.Tensor,
+@@ -114,6 +149,8 @@ def spherical_kmeans(
+     iterations: int = 20,
+     num_directions: int = 1 << DEFAULT_CODEBOOK_BITS,
+     seed: int = 0,
++    positive: torch.Tensor | None = None,
++    position_weights: torch.Tensor | None = None,
+ ) -> torch.Tensor:
+     if directions.ndim != 2 or directions.shape[1] != VECTOR_SIZE:
+         raise ValueError(f"Expected [N, 8] directions, got {directions.shape}")
+@@ -124,6 +161,8 @@ def spherical_kmeans(
+             f"codebook, got {sample_count}"
+         )
+     weights = radius.float().square()
++    if positive is not None and position_weights is not None:
++        weights = (position_weights * positive.float().square()).sum(dim=1)
+     if float(weights.sum()) == 0:
+         probabilities = torch.full_like(weights, 1 / weights.numel())
+     else:
+@@ -143,18 +182,33 @@ def spherical_kmeans(
+     )[:num_directions]
+     centers = sampled[initial].clone()
+     centers /= centers.norm(dim=1, keepdim=True).clamp_min(1e-12)
++    if positive is None or position_weights is None:
++        for _ in range(iterations):
++            assignments = assign_directions(sampled, centers)
++            sums = torch.zeros_like(centers)
++            counts = torch.zeros(num_directions, dtype=torch.long, device=centers.device)
++            sums.index_add_(0, assignments, sampled)
++            counts.index_add_(0, assignments, torch.ones_like(assignments))
++            nonempty = counts > 0
++            centers[nonempty] = sums[nonempty] / counts[nonempty, None]
++            centers /= centers.norm(dim=1, keepdim=True).clamp_min(1e-12)
++        return centers
++
++    sampled_positive = positive[sampled_ids].float()
++    sampled_weights = position_weights[sampled_ids].float()
+     for _ in range(iterations):
+-        assignments = assign_directions(sampled, centers)
+-        sums = torch.zeros_like(centers)
+-        counts = torch.zeros(
+-            num_directions,
+-            dtype=torch.long,
+-            device=centers.device,
+-        )
+-        sums.index_add_(0, assignments, sampled)
+-        counts.index_add_(0, assignments, torch.ones_like(assignments))
+-        nonempty = counts > 0
+-        centers[nonempty] = sums[nonempty] / counts[nonempty, None]
++        assignments = assign_directions_weighted(sampled_positive, centers, sampled_weights)
++        radii = weighted_ls_radius(
++            sampled_positive, centers[assignments], sampled_weights
++        ).clamp_min(1e-12)
++        scaled = sampled_weights * radii[:, None]
++        numerator = torch.zeros_like(centers)
++        denominator = torch.zeros_like(centers)
++        numerator.index_add_(0, assignments, scaled * sampled_positive)
++        denominator.index_add_(0, assignments, scaled * radii[:, None])
++        nonempty = denominator.sum(dim=1) > 0
++        centers[nonempty] = numerator[nonempty] / denominator[nonempty].clamp_min(1e-12)
++        centers.clamp_min_(0)
+         centers /= centers.norm(dim=1, keepdim=True).clamp_min(1e-12)
+     return centers
+ 
+@@ -167,6 +221,7 @@ def initialize_spherical_weight(
+     kmeans_iterations: int = 20,
+     codebook_bits: int = DEFAULT_CODEBOOK_BITS,
+     seed: int = 0,
++    position_weights: torch.Tensor | None = None,
+ ) -> dict[str, torch.Tensor]:
+     if weight.ndim != 2 or weight.shape[1] % GROUP_SIZE:
+         raise ValueError(
+@@ -186,10 +241,16 @@ def initialize_spherical_weight(
+         iterations=kmeans_iterations,
+         num_directions=1 << codebook_bits,
+         seed=seed,
++        positive=positive if position_weights is not None else None,
++        position_weights=position_weights,
+     )
+-    indices = assign_directions(directions, codebook)
+-    selected = codebook[indices]
+-    ls_radius = (positive * selected).sum(dim=1).clamp_min(1e-8)
++    if position_weights is None:
++        indices = assign_directions(directions, codebook)
++        ls_radius = (positive * codebook[indices]).sum(dim=1)
++    else:
++        indices = assign_directions_weighted(positive, codebook, position_weights)
++        ls_radius = weighted_ls_radius(positive, codebook[indices], position_weights)
++    ls_radius = ls_radius.clamp_min(1e-8)
+     vector_shape = (weight.shape[0], weight.shape[1] // VECTOR_SIZE)
+     return {
+         "signs": torch.where(weight >= 0, 1, -1).to(torch.int8),
+@@ -204,8 +265,8 @@ def materialize_spherical_weight(
+     direction_indices: torch.Tensor,
+     radius_logits: torch.Tensor,
+     angle_logits: torch.Tensor,
+-    radius_bits: torch.Tensor,
+-    group_size: torch.Tensor,
++    radius_bits: torch.Tensor | int,
++    group_size: torch.Tensor | int,
+ ) -> torch.Tensor:
+     codebook = direction_codebook_from_logits(angle_logits)
+     directions = codebook[direction_indices.long()]
+@@ -345,16 +406,10 @@ class SPHPseudoQuantizedLinear(nn.Module):
+             device=signs.device,
+             dtype=torch.float32,
+         )
+-        initialized = {
+-            "signs": signs,
+-            "direction_indices": state_dict["direction_indices"],
+-            "radius_logits": state_dict["radius_logits"],
+-            "angle_logits": state_dict["angle_logits"],
+-        }
+         module = cls(
+             linear,
+             codebook_bits=checkpoint_codebook_bits,
+-            initialized=initialized,
++            initialized=state_dict,
+         )
+         module.load_state_dict(state_dict)
+         return module
+diff --git a/tests/test_sagelinear.py b/tests/test_sagelinear.py
+new file mode 100644
+index 0000000..bff9a6f
+--- /dev/null
++++ b/tests/test_sagelinear.py
+@@ -0,0 +1,208 @@
++import pytest
++import torch
++from torch import nn
++
++from paroquant.optim.sagelinear import SAGEPseudoQuantizedLinear
++from paroquant.optim.sphlinear import (
++    SPHPseudoQuantizedLinear,
++    assign_directions,
++    assign_directions_weighted,
++    initialize_spherical_weight,
++    materialize_spherical_weight,
++    radius_fake_quantize,
++    spherical_kmeans,
++    weighted_ls_radius,
++)
++
++
++def test_radius_grid_rounds_offset_and_step_before_assigning_codes():
++    radii = (
++        torch.tensor(
++            [
++                0.10003,
++                0.1011,
++                0.104,
++                0.111,
++                0.13,
++                0.14,
++                0.16,
++                0.173,
++                0.182,
++                0.195,
++                0.212,
++                0.215,
++                0.22,
++                0.25,
++                0.275,
++                0.30017,
++            ]
++        )
++        .reshape(1, 16)
++        .requires_grad_(True)
++    )
++    for bits in (2, 3, 4):
++        offset = radii.detach().amin().half().float()
++        step = ((radii.detach().amax() - radii.detach().amin()) / ((1 << bits) - 1)).half().float()
++        codes = ((radii.detach() - offset) / step).round().clamp(0, (1 << bits) - 1)
++        expected = offset + step * codes
++        actual = radius_fake_quantize(radii, bits=bits)
++        torch.testing.assert_close(actual, expected, rtol=0, atol=0)
++        actual.sum().backward()
++        torch.testing.assert_close(radii.grad, torch.ones_like(radii))
++        radii.grad = None
++
++
++def test_constant_and_underflowed_radius_grids_use_fp16_offset():
++    radii = torch.full((2, 16), 0.10003)
++    radii[1] += torch.linspace(0, 1e-8, 16)
++    torch.testing.assert_close(
++        radius_fake_quantize(radii), radii.amin(1, keepdim=True).half().float().expand_as(radii)
++    )
++
++
++def test_weighted_assignment_matches_brute_force_and_uniform_rule():
++    torch.manual_seed(17)
++    positive = torch.rand(23, 8)
++    codebook = torch.rand(11, 8)
++    codebook /= codebook.norm(dim=1, keepdim=True)
++    weights = torch.rand_like(positive) + 0.01
++    numerator = (weights[:, None, :] * positive[:, None, :] * codebook[None, :, :]).sum(-1)
++    denominator = (weights[:, None, :] * codebook[None, :, :].square()).sum(-1)
++    radii = numerator / denominator
++    error = (
++        weights[:, None, :] * (positive[:, None, :] - radii[..., None] * codebook).square()
++    ).sum(-1)
++    indices = assign_directions_weighted(positive, codebook, weights, chunk_size=5)
++    assert torch.equal(indices, error.argmin(1))
++    torch.testing.assert_close(
++        weighted_ls_radius(positive, codebook[indices], weights), radii[torch.arange(23), indices]
++    )
++    assert torch.equal(
++        assign_directions_weighted(positive, codebook, torch.ones_like(weights)),
++        assign_directions(positive / positive.norm(dim=1, keepdim=True), codebook),
++    )
++
++
++@pytest.mark.parametrize("esg", [False, True])
++@pytest.mark.parametrize("adaptive_bits", [False, True])
++def test_sage_matches_candidate_scores_and_retains_winning_initialization(esg, adaptive_bits):
++    torch.manual_seed(5)
++    linear = nn.Linear(128, 16, bias=True)
++    energy = torch.logspace(-3, 3, 128)[torch.randperm(128)]
++    module = SAGEPseudoQuantizedLinear(
++        linear,
++        channel_energy=energy,
++        esg=esg,
++        adaptive_bits=adaptive_bits,
++        sample_size=256,
++        kmeans_iterations=2,
++        seed=19,
++    )
++    order = energy.argsort(descending=True).reshape(8, -1).T.flatten() if esg else torch.arange(128)
++    torch.testing.assert_close(module.channel_unpermutation, order.argsort())
++    weight = linear.weight.detach().float()[:, order]
++    weights = None
++    if esg:
++        weights = energy[order].reshape(-1, 8).pow(0.75)
++        weights = (weights / weights.mean(dim=1, keepdim=True)).repeat(16, 1)
++    errors = {}
++    states = {}
++    for bits in (6, 7, 8) if adaptive_bits else (6,):
++        state = initialize_spherical_weight(
++            weight,
++            sample_size=256,
++            kmeans_iterations=2,
++            codebook_bits=bits,
++            seed=19,
++            position_weights=weights,
++        )
++        reconstruction = materialize_spherical_weight(
++            **state, radius_bits=10 - bits, group_size=128
++        )
++        # Evaluate in original channel order, independently of the planner's layout.
++        reconstruction = reconstruction[:, order.argsort()]
++        errors[bits] = float(
++            ((linear.weight.detach() - reconstruction).square() * energy).sum()
++            / (linear.weight.detach().square() * energy).sum()
++        )
++        states[bits] = state
++    winner = min(errors, key=errors.get) if adaptive_bits else 6
++    assert module.radius_bits.item() == 10 - winner
++    if adaptive_bits:
++        assert module.candidate_errors == pytest.approx(errors, rel=1e-6)
++    else:
++        assert not module.candidate_errors
++    for key, value in states[winner].items():
++        torch.testing.assert_close(module.state_dict()[key], value, rtol=0, atol=0)
++    restored = SAGEPseudoQuantizedLinear.from_state_dict(module.state_dict())
++    torch.testing.assert_close(restored.pseudo_weight(), module.pseudo_weight(), rtol=0, atol=0)
++    torch.testing.assert_close(restored.bias, linear.bias)
++
++
++def test_disabling_esg_and_abs_recovers_sphquant_exactly():
++    torch.manual_seed(2)
++    linear = nn.Linear(128, 8, bias=False)
++    kwargs = dict(sample_size=128, kmeans_iterations=2, seed=3)
++    baseline = SPHPseudoQuantizedLinear(linear, **kwargs)
++    ablation = SAGEPseudoQuantizedLinear(linear, esg=False, adaptive_bits=False, **kwargs)
++    torch.testing.assert_close(ablation.pseudo_weight(), baseline.pseudo_weight(), rtol=0, atol=0)
++
++
++@pytest.mark.parametrize("checkpointing", [False, True])
++def test_sage_training_updates_only_radii_and_codebook(checkpointing):
++    torch.manual_seed(7)
++    module = SAGEPseudoQuantizedLinear(
++        nn.Linear(128, 16, bias=True),
++        channel_energy=torch.logspace(-2, 2, 128),
++        sample_size=256,
++        kmeans_iterations=1,
++    )
++    module.enable_checkpoint = checkpointing
++    module.set_optim_enabled(radius=True, codebook=True)
++    buffers = {name: value.clone() for name, value in module.named_buffers()}
++    parameters = {name: value.detach().clone() for name, value in module.named_parameters()}
++    optimizer = torch.optim.Adam([module.radius_logits, module.angle_logits], lr=0.001)
++    module(torch.randn(3, 128)).square().mean().backward()
++    assert module.radius_logits.grad.abs().sum() > 0
++    assert module.angle_logits.grad.abs().sum() > 0
++    optimizer.step()
++    for name, value in module.named_buffers():
++        torch.testing.assert_close(value, buffers[name], rtol=0, atol=0)
++    for name in ("radius_logits", "angle_logits"):
++        assert not torch.equal(module.get_parameter(name), parameters[name])
++    torch.testing.assert_close(module.bias, parameters["bias"], rtol=0, atol=0)
++
++
++def test_weighted_kmeans_centroid_update_matches_least_squares():
++    torch.manual_seed(11)
++    positive = torch.rand(13, 8)
++    weights = torch.rand(13, 8) + 0.01
++    radius = positive.norm(dim=1)
++    directions = positive / radius[:, None]
++    # Reproduce only the random draw, then derive the single-cluster update
++    # independently rather than invoking the implementation's assignment helpers.
++    generator = torch.Generator().manual_seed(23)
++    energy = (weights * positive.square()).sum(1)
++    sampled = torch.multinomial(energy / energy.sum(), 13, replacement=False, generator=generator)
++    center = directions[sampled[torch.randperm(13, generator=generator)[0]]]
++    radii = (weights * positive * center).sum(1) / (weights * center.square()).sum(1)
++    expected = (weights * radii[:, None] * positive).sum(0) / (
++        weights * radii[:, None].square()
++    ).sum(0)
++    expected /= expected.norm()
++    actual = spherical_kmeans(
++        directions,
++        radius,
++        sample_size=13,
++        iterations=1,
++        num_directions=1,
++        seed=23,
++        positive=positive,
++        position_weights=weights,
++    )
++    torch.testing.assert_close(actual[0], expected)
++
++
++def test_sage_requires_statistics_instead_of_silently_disabling_contributions():
++    with pytest.raises(ValueError, match="requires teacher input-channel energies"):
++        SAGEPseudoQuantizedLinear(nn.Linear(128, 16))
+diff --git a/tests/test_sph_optimize.py b/tests/test_sph_optimize.py
+index 2604779..c0721c1 100644
+--- a/tests/test_sph_optimize.py
++++ b/tests/test_sph_optimize.py
+@@ -1,21 +1,26 @@
++import json
++from functools import partial
++
+ import pytest
+ import torch
+ from transformers import Qwen3Config, Qwen3ForCausalLM
+ 
+ from paroquant.cli import optimize
+ from paroquant.optim.sphlinear import SPHPseudoQuantizedLinear
++from paroquant.optim.sagelinear import SAGEPseudoQuantizedLinear
++from paroquant.optim.util import get_named_linears
+ 
+ 
+ @pytest.mark.skipif(not torch.cuda.is_available(), reason="layerwise optimization uses CUDA")
+-@pytest.mark.parametrize("codebook_bits", [6, 8])
+-def test_text_sph_optimization_and_resume(tmp_path, monkeypatch, codebook_bits):
++@pytest.mark.parametrize("method,codebook_bits", [("sphquant", 6), ("sphquant", 8), ("sage", 6)])
++def test_text_sph_optimization_and_resume(tmp_path, monkeypatch, method, codebook_bits):
+     model_path = tmp_path / "source"
+     model = Qwen3ForCausalLM(
+         Qwen3Config(
+             vocab_size=64,
+             hidden_size=128,
+             intermediate_size=256,
+-            num_hidden_layers=1,
++            num_hidden_layers=2,
+             num_attention_heads=4,
+             num_key_value_heads=2,
+             head_dim=32,
+@@ -24,17 +29,14 @@ def test_text_sph_optimization_and_resume(tmp_path, monkeypatch, codebook_bits):
+     model.save_pretrained(model_path)
+     calibration_path = tmp_path / "calibration.pt"
+     torch.save(
+-        {
+-            "train": torch.randint(0, 64, (4, 8)),
+-            "validation": torch.randint(0, 64, (2, 8)),
+-        },
++        {"train": torch.randint(0, 64, (4, 8)), "validation": torch.randint(0, 64, (2, 8))},
+         calibration_path,
+     )
+     config = optimize.Config(
+         model=str(model_path),
+         params=["radius:0.001,codebook:0.001"],
+         epochs=[1],
+-        method="sphquant",
++        method=method,
+         weight_decay=0.0,
+         betas=(0.9, 0.999),
+         eps=1e-8,
+@@ -55,20 +57,105 @@ def test_text_sph_optimization_and_resume(tmp_path, monkeypatch, codebook_bits):
+         sph_kmeans_iterations=1,
+         sph_codebook_bits=codebook_bits,
+         output_dir=str(tmp_path / "checkpoints"),
++        checkpointing=True,
+         seed=0,
+     )
++    # Independently run the dense teacher. The planner must see these energies
++    # even in block two, where the student's inputs are already quantized.
++    if method == "sage":
++        teacher = optimize.load_model(
++            str(model_path), device_map="cuda", dtype=torch.float16
++        ).half()
++        teacher_inputs, teacher_outputs, energies = {}, {}, {}
++
++        def capture_block(index, _module, inputs, output):
++            teacher_inputs.setdefault(index, []).append(inputs[0].detach().cpu())
++            teacher_outputs.setdefault(index, []).append(output.detach().cpu())
++
++        def capture_energy(name, _module, inputs, _output):
++            x = inputs[0].detach().float().reshape(-1, inputs[0].shape[-1])
++            energies.setdefault(name, []).append(x.square().cpu())
++
++        handles = []
++        for index, layer in enumerate(teacher.model.layers):
++            handles.append(layer.register_forward_hook(partial(capture_block, index)))
++            for name, module in get_named_linears(layer).items():
++                handles.append(
++                    module.register_forward_hook(partial(capture_energy, f"{index}.{name}"))
++                )
++        samples = torch.load(calibration_path, weights_only=True)["train"]
++        with torch.no_grad():
++            for batch in samples.split(config.batch_size):
++                teacher(batch.cuda(), use_cache=False)
++        for handle in handles:
++            handle.remove()
++        teacher.cpu()
++        expected_energies = iter(torch.cat(values).mean(0) for values in energies.values())
++        original_init = SAGEPseudoQuantizedLinear.__init__
++
++        def observe_initialization(self, linear, **kwargs):
++            if "channel_energy" in kwargs:
++                torch.testing.assert_close(kwargs["channel_energy"], next(expected_energies))
++            original_init(self, linear, **kwargs)
++
++        monkeypatch.setattr(SAGEPseudoQuantizedLinear, "__init__", observe_initialization)
++        original_optimize = optimize.optimize_module
++        student_inputs = []
++
++        def observe_training(layer, train_data, *args, **kwargs):
++            index = len(student_inputs)
++            student_inputs.append([batch[0].cpu().clone() for batch in train_data[0].batches])
++            for actual, expected in zip(train_data[1].batches, teacher_outputs[index]):
++                torch.testing.assert_close(actual.cpu(), expected)
++            return original_optimize(layer, train_data, *args, **kwargs)
++
++        monkeypatch.setattr(optimize, "optimize_module", observe_training)
++
+     monkeypatch.setattr(optimize.simple_parsing, "parse", lambda *_args, **_kwargs: config)
+     optimize.main()
++    if method == "sage":
++        assert next(expected_energies, None) is None
++        torch.testing.assert_close(student_inputs[0], teacher_inputs[0])
++        assert not torch.equal(torch.cat(student_inputs[1]), torch.cat(teacher_inputs[1]))
++        # Rebuild just the first quantized block; its outputs must be exactly the
++        # inputs supplied to the second student's reconstruction, not dense inputs.
++        first = teacher.model.layers[0]
++        for name in get_named_linears(first):
++            state = torch.load(
++                tmp_path / "checkpoints" / "source" / f"0.{name}.pt", weights_only=True
++            )
++            optimize.set_module_by_name(
++                first, name, SAGEPseudoQuantizedLinear.from_state_dict(state)
++            )
++        teacher.half().cuda()
++        propagated = []
++        handle = teacher.model.layers[1].register_forward_pre_hook(
++            lambda _module, inputs: propagated.append(inputs[0].detach().cpu())
++        )
++        with torch.no_grad():
++            for batch in samples.split(config.batch_size):
++                teacher(batch.cuda(), use_cache=False)
++        handle.remove()
++        torch.testing.assert_close(student_inputs[1], propagated)
++        teacher.cpu()
+ 
+     checkpoints = sorted((tmp_path / "checkpoints" / "source").glob("*.pt"))
+-    assert len(checkpoints) == 7
++    assert len(checkpoints) == 14
+     for path in checkpoints:
+-        restored = SPHPseudoQuantizedLinear.from_state_dict(
+-            torch.load(path, map_location="cpu", weights_only=True),
+-            codebook_bits=codebook_bits,
+-        )
++        state = torch.load(path, map_location="cpu", weights_only=True)
++        if method == "sage":
++            restored = SAGEPseudoQuantizedLinear.from_state_dict(state)
++            layer, name = path.stem.split(".", 1)
++            plan = json.loads(path.with_name(f"{layer}.format.json").read_text())[name]
++            assert restored.radius_bits.item() == plan["radius_bits"]
++            errors = plan["candidate_errors"]
++            assert plan["codebook_bits"] == int(min(errors, key=errors.get))
++        else:
++            restored = SPHPseudoQuantizedLinear.from_state_dict(state, codebook_bits=codebook_bits)
++            assert restored.radius_bits.item() == 10 - codebook_bits
+         assert torch.isfinite(restored.pseudo_weight()).all()
+-        assert restored.radius_bits.item() == 10 - codebook_bits
++    before_resume = {path: path.read_bytes() for path in checkpoints}
++    plans = {path: path.read_bytes() for path in checkpoints[0].parent.glob("*.format.json")}
+ 
+     def reject_training(*_args, **_kwargs):
+         pytest.fail("resume must reuse completed layer checkpoints")
+@@ -76,3 +163,5 @@ def test_text_sph_optimization_and_resume(tmp_path, monkeypatch, codebook_bits):
+     config.resume = True
+     monkeypatch.setattr(optimize, "optimize_module", reject_training)
+     optimize.main()
++    for path, contents in (before_resume | plans).items():
++        assert path.read_bytes() == contents
+diff --git a/tests/test_sphconvert.py b/tests/test_sphconvert.py
+index 72e0dba..a3df55c 100644
+--- a/tests/test_sphconvert.py
++++ b/tests/test_sphconvert.py
+@@ -6,6 +6,7 @@ from transformers import AutoModelForCausalLM, Qwen3Config, Qwen3ForCausalLM
+ 
+ from paroquant.cli import convert
+ from paroquant.optim.sphlinear import SPHPseudoQuantizedLinear
++from paroquant.optim.sagelinear import SAGEPseudoQuantizedLinear
+ from paroquant.optim.util import load_model
+ 
+ 
+@@ -36,34 +37,51 @@ def test_text_loaders_preserve_source_weights(source_model):
+ 
+ 
+ @pytest.mark.skipif(not torch.cuda.is_available(), reason="pseudo conversion uses CUDA")
+-def test_text_pseudo_export_roundtrip(source_model, tmp_path, monkeypatch):
++@pytest.mark.parametrize("method", ["sphquant", "sage"])
++def test_text_pseudo_export_roundtrip(source_model, tmp_path, monkeypatch, method):
+     source, model = source_model
+     result_dir = tmp_path / "checkpoints"
+     result_dir.mkdir()
+-    projection = model.model.layers[0].self_attn.q_proj
+-    quantized = SPHPseudoQuantizedLinear(
+-        projection, sample_size=64, kmeans_iterations=1, seed=0
+-    )
+-    torch.save(quantized.state_dict(), result_dir / "0.self_attn.q_proj.pt")
++    expected_weights = {}
++    for index, name in enumerate(("q_proj", "k_proj", "v_proj")):
++        projection = getattr(model.model.layers[0].self_attn, name)
++        if method == "sage":
++            quantized = SAGEPseudoQuantizedLinear(
++                projection,
++                channel_energy=torch.logspace(-2, 2, 128),
++                adaptive_bits=False,
++                codebook_bits=6 + index,
++                sample_size=256,
++                kmeans_iterations=1,
++                seed=0,
++            )
++        else:
++            quantized = SPHPseudoQuantizedLinear(
++                projection, sample_size=256, kmeans_iterations=1, codebook_bits=6 + index, seed=0
++            )
++        torch.save(quantized.state_dict(), result_dir / f"0.self_attn.{name}.pt")
++        expected_weights[f"model.layers.0.self_attn.{name}.weight"] = quantized.pseudo_weight()
+     exported = tmp_path / "exported"
+     monkeypatch.setattr(
+         sys,
+         "argv",
+         [
+             "paroquant.cli.convert",
+-            "--model", str(source),
+-            "--result-dir", str(result_dir),
+-            "--output-path", str(exported),
+-            "--mode", "pseudo",
++            "--model",
++            str(source),
++            "--result-dir",
++            str(result_dir),
++            "--output-path",
++            str(exported),
++            "--mode",
++            "pseudo",
+         ],
+     )
+     convert.main()
+ 
+     restored = AutoModelForCausalLM.from_pretrained(exported, local_files_only=True).eval()
+-    target = "model.layers.0.self_attn.q_proj.weight"
+-    expected = quantized.pseudo_weight().detach()
+     for key, value in restored.state_dict().items():
+-        torch.testing.assert_close(value, expected if key == target else model.state_dict()[key])
++        torch.testing.assert_close(value, expected_weights.get(key, model.state_dict()[key]))
+     with torch.no_grad():
+         output = restored(torch.randint(0, 64, (1, 8)), use_cache=False)
+     assert torch.isfinite(output.logits).all()

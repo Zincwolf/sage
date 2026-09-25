@@ -1,0 +1,28 @@
+# Original dense HF model and pre-tokenized train/validation calibration.
+model: /path/to/Qwen3-4B-Instruct-2507
+calibration: outputs/calibration/calibration.pt
+output_dir: outputs/sage/qwen3
+device: 0
+
+# ESG fits under normalized energy**0.75; ABS scores under raw energy.
+# Both methods simulate FP16 radius-grid offset and step before dequantization.
+esg: true
+adaptive_bits: true
+energy_power: 0.75
+# Used only when adaptive_bits=false; 6 reproduces the SPHQuant 64/4 split.
+codebook_bits: 6
+sample_size: 65536
+kmeans_iterations: 20
+
+# ParoQuant reconstruction: quantized student inputs, full-precision targets.
+epochs: 20
+learning_rate: 0.001
+batch_size: 16
+gradient_accumulation_steps: 1
+cache_shards: 8
+resume: true
+checkpointing: true
+seed: 0
+max_layers: null
+calibration_limit: null
+use_wandb: false

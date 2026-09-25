@@ -1,4 +1,4 @@
-"""SPHQuant stage adapters for dense Qwen3 QDQ export."""
+"""Shared ParoQuant stage adapters for SPHQuant and SAGE dense QDQ export."""
 
 from __future__ import annotations
 
@@ -11,6 +11,7 @@ from pathlib import Path
 
 from weight_vq import utils
 from weight_vq.calibration import load_calibration_metadata
+from weight_vq.sage.config import SAGEConfig
 from weight_vq.sphquant.config import SPHQuantConfig
 
 PROJECTIONS = (
@@ -77,13 +78,13 @@ def optimize(config: SPHQuantConfig) -> None:
     _target_layers(config, model_layers)
     metadata = load_calibration_metadata(config.calibration)
 
-    # This is the verified Qwen3 W2 recipe.
-    # Keep these constants at the ParoQuant boundary until experiments require variants.
+    # Both methods share the SPHQuant reconstruction protocol. Only SAGE adds
+    # teacher-energy statistics, ESG initialization and per-matrix ABS selection.
     arguments = {
         "model": str(config.model),
         "params": [f"radius:{config.learning_rate},codebook:{config.learning_rate}"],
         "epochs": [config.epochs],
-        "method": "sphquant",
+        "method": "sage" if isinstance(config, SAGEConfig) else "sphquant",
         "weight_decay": 0.0,
         "betas": (0.9, 0.999),
         "eps": 1e-8,
@@ -116,6 +117,13 @@ def optimize(config: SPHQuantConfig) -> None:
         "use_wandb": config.use_wandb,
     }
 
+    if isinstance(config, SAGEConfig):
+        arguments.update(
+            sage_esg=config.esg,
+            sage_adaptive_bits=config.adaptive_bits,
+            sage_energy_power=config.energy_power,
+        )
+
     with _physical_device(config.device):
         from paroquant.cli import optimize as pq_opt
 
@@ -135,7 +143,8 @@ def export(config: SPHQuantConfig) -> None:
     if missing:
         preview = [str(path) for path in missing[:8]]
         raise FileNotFoundError(
-            f"missing {len(missing)} SPHQuant checkpoints; first entries: {preview}"
+            f"missing {len(missing)} {'SAGE' if isinstance(config, SAGEConfig) else 'SPHQuant'} "
+            f"checkpoints; first entries: {preview}"
         )
     if config.exported_model.exists():
         raise FileExistsError(f"refusing to overwrite {config.exported_model}")
@@ -167,6 +176,13 @@ def export(config: SPHQuantConfig) -> None:
             sys.argv = original_argv
             if staging.exists():
                 shutil.rmtree(staging)
+
+
+def run(config: SPHQuantConfig) -> None:
+    """Produce and validate a dense QDQ model with one shared configuration."""
+    optimize(config)
+    export(config)
+    validate(config)
 
 
 def validate(config: SPHQuantConfig) -> None:

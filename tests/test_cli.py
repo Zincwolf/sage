@@ -6,6 +6,7 @@ from weight_vq import cli
 from weight_vq.config import CalibrationConfig, TokenizerConfig
 from weight_vq.qtip.config import QTIPConfig
 from weight_vq.quip_sharp.config import QuIPSharpConfig
+from weight_vq.sage.config import SAGEConfig
 from weight_vq.sphquant.config import SPHQuantConfig
 
 
@@ -100,9 +101,10 @@ def test_cli_rejects_retired_vlm_calibration() -> None:
     assert exit_info.value.code == 2
 
 
-@pytest.mark.parametrize("stage", ["optimize", "export", "validate"])
+@pytest.mark.parametrize("method,config_type", [("sphquant", SPHQuantConfig), ("sage", SAGEConfig)])
+@pytest.mark.parametrize("stage", ["optimize", "export", "validate", "run"])
 def test_cli_loads_shared_flat_sphquant_config(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, stage: str
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, stage: str, method: str, config_type: type
 ) -> None:
     config = tmp_path / "sphquant.yaml"
     config.write_text(
@@ -119,12 +121,12 @@ def test_cli_loads_shared_flat_sphquant_config(
         "calibration_limit: 32\n"
     )
     received: list[SPHQuantConfig] = []
-    monkeypatch.setitem(cli.STAGES, ("sphquant", stage), (received.append, SPHQuantConfig))
+    monkeypatch.setitem(cli.STAGES, (method, stage), (received.append, config_type))
 
-    cli.main(["sphquant", stage, "--config", str(config)])
+    cli.main([method, stage, "--config", str(config)])
 
     assert received == [
-        SPHQuantConfig(
+        config_type(
             model=Path("/models/qwen3"),
             calibration=Path("/data/calibration.pt"),
             output_dir=Path("outputs/sphquant"),

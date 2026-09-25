@@ -14,6 +14,7 @@ from weight_vq.blockwise import pipeline as blockwise_pipeline
 from weight_vq.config import CalibrationConfig
 from weight_vq.qtip.config import QTIPConfig
 from weight_vq.quip_sharp.config import QuIPSharpConfig
+from weight_vq.sage.config import SAGEConfig
 from weight_vq.sphquant import pipeline as sphquant_pipeline
 from weight_vq.sphquant.config import SPHQuantConfig
 from weight_vq.unisvq.config import UniSVQConfig
@@ -32,12 +33,12 @@ STAGES: dict[tuple[str, str], tuple[Stage, ConfigType]] = {
 }
 STAGES.update(
     {
-        ("data", "calibration"): (calibration.main, CalibrationConfig),
-        ("sphquant", "optimize"): (sphquant_pipeline.optimize, SPHQuantConfig),
-        ("sphquant", "export"): (sphquant_pipeline.export, SPHQuantConfig),
-        ("sphquant", "validate"): (sphquant_pipeline.validate, SPHQuantConfig),
+        (method, stage): (getattr(sphquant_pipeline, stage), config_type)
+        for method, config_type in (("sphquant", SPHQuantConfig), ("sage", SAGEConfig))
+        for stage in ("optimize", "export", "validate", "run")
     }
 )
+STAGES[("data", "calibration")] = (calibration.main, CalibrationConfig)
 
 
 def parser() -> ArgumentParser:

@@ -9,6 +9,7 @@ import pytest
 from torch import nn
 
 from weight_vq.config import CalibrationMetadata
+from weight_vq.sage.config import SAGEConfig
 from weight_vq.sphquant.config import SPHQuantConfig
 from weight_vq.sphquant.pipeline import (
     PROJECTIONS,
@@ -21,8 +22,10 @@ from weight_vq.sphquant.pipeline import (
 )
 
 
-def smoke_config(tmp_path: Path) -> SPHQuantConfig:
-    return SPHQuantConfig(
+def smoke_config(
+    tmp_path: Path, config_type: type[SPHQuantConfig] = SPHQuantConfig
+) -> SPHQuantConfig:
+    return config_type(
         model=Path("/models/Qwen3-4B-Instruct-2507"),
         calibration=Path("outputs/calibration.pt"),
         output_dir=tmp_path,
@@ -67,8 +70,9 @@ def test_model_contract_accepts_only_qwen3(monkeypatch: pytest.MonkeyPatch) -> N
             _model_contract(Path(name))
 
 
+@pytest.mark.parametrize("config_type", [SPHQuantConfig, SAGEConfig])
 def test_optimize_preserves_qwen3_text_recipe(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, config_type: type[SPHQuantConfig]
 ) -> None:
     parsed: list[tuple[dict[str, object], str | None]] = []
     reference_parse = object()
@@ -90,10 +94,16 @@ def test_optimize_preserves_qwen3_text_recipe(
     )
     monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "8")
 
-    optimize(smoke_config(tmp_path))
+    optimize(smoke_config(tmp_path, config_type))
 
     arguments, device = parsed[0]
-    assert arguments["method"] == "sphquant"
+    assert arguments["method"] == ("sage" if config_type is SAGEConfig else "sphquant")
+    if config_type is SAGEConfig:
+        assert arguments["sage_esg"] is True
+        assert arguments["sage_adaptive_bits"] is True
+        assert arguments["sage_energy_power"] == 0.75
+    else:
+        assert not any(key.startswith("sage_") for key in arguments)
     assert arguments["params"] == ["radius:0.001,codebook:0.001"]
     assert arguments["datasets"] == ["wikitext2", "c4", "redpajama"]
     assert arguments["val_dataset"] == "pileval"

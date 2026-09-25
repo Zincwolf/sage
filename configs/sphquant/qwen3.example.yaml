@@ -8,11 +8,11 @@ output_dir: outputs/sphquant/qwen3
 # SPHQuant is sequential across layers and therefore uses one physical GPU.
 device: 0
 
-# Spherical codebook initialization. codebook_bits: 8 keeps the 10-bit
-# per-vector budget by using 256 directions and 2-bit radii.
+# Published SPHQuant split: 64 directions, 4-bit radii, FP16 grid offset/step.
+# codebook_bits: 8 instead uses 256 directions and 2-bit radii at the same payload.
 sample_size: 65536
 kmeans_iterations: 20
-codebook_bits: 8
+codebook_bits: 6
 
 # Layerwise radius/codebook recovery. The verified full recipe uses 20 epochs.
 epochs: 20
