@@ -1,59 +1,61 @@
-# Weight-VQ
+# WVQ
 
-从原始 Hugging Face 模型生成 dense QDQ 量化模型的统一流水线。
+For paper *SAGE: PUSHING 2-BIT VECTOR-QUANTIZED LLMS TOWARD REAL-WORLD USABILITY*.
 
-## 支持列表
+Weight vector quantization for Hugging Face models with QTIP, QuIP#, UniSVQ,
+SPHQuant, and SAGE. Outputs are standard HF models with quantized-and-dequantized
+floating-point weights (dense QDQ). Evaluation is handled separately.
 
-| Model                              | QuIP# | QTIP | UniSVQ | SPHQuant |
-| ---------------------------------- | ----- | ---- | ------ | -------- |
-| Qwen3-4B-Instruct-2507             | ✅     | ✅    | ✅      | ✅        |
-| Qwen3.5-4B                         | ✅     | ✅    | ✅      |          |
-| Qwen3-30B-A3B-Instruct-2507        | ✅     | ✅    | ✅      |          |
-| Ministral-3-8B-Instruct-2512-BF16  | ✅     | ✅    | ✅      |          |
-| Ministral-3-14B-Instruct-2512-BF16 | ✅     | ✅    | ✅      |          |
+## Setup
 
-## 环境
+Requires Linux, an NVIDIA GPU, the CUDA 12.8 toolkit, Python 3.11, and
+[uv](https://docs.astral.sh/uv/).
 
-仓库只使用根目录的 Python 3.11 uv 环境。环境提供互斥的 CUDA profile `cu124`（停止维护）和 `cu128`。
-例如配置 CUDA 12.8 环境可使用：
+Initialize the submodules and apply their patches following
+[THIRD_PARTY.md](THIRD_PARTY.md#initial-checkout), then create the environment:
 
-```bash
-CUDA_HOME=/usr/local/cuda-12.8 MAX_JOBS=8 uv sync --extra cu128 --locked
-```
+`CUDA_HOME=/usr/local/cuda-12.8 uv sync --extra cu128 --locked`
 
-Fast Hadamard Transform 从本仓库 submodule 构建，并由 uv 注入与运行时匹配的 Torch 构建依赖。构建产物进入 uv cache，后续同步可以复用。
+The initial sync downloads dependencies and builds CUDA extensions.
 
-## 第三方补丁
+## Usage
 
-第三方仓库保持在 `.gitmodules` 和 [THIRD_PARTY.md](THIRD_PARTY.md) 记录的上游 revision；本地适配以 `patches/<upstream>/` 下的完整 `git format-patch` 系列维护，不更新父仓库中的 submodule gitlink。首次检出后，按文件名顺序应用所需补丁。例如 SPHQuant：
+[Example configurations](configs/) cover the supported methods and models.
+Prepare a local HF model and a calibration artifact; the
+[calibration template](configs/data/calibration.example.yaml) and
+`uv run wvq data calibration --help` describe calibration setup for
+SPHQuant and SAGE.
 
-```bash
-git submodule update --init third_party/paroquant
-(cd third_party/paroquant && git am ../../patches/paroquant/*.patch)
-```
-
-应用后，父仓库中 `third_party/paroquant` 显示 modified 是正常现象，不要执行 `git add third_party/paroquant`。补丁的维护、重建和校验规范见 [THIRD_PARTY.md](THIRD_PARTY.md)。
-
-## 配置与运行
-
-只提交 `configs/**/*.example.yaml`。复制模板后填写实际路径；普通 `.yaml` 已被 Git 忽略。
+Copy a method template and set its model, calibration, and output paths:
 
 ```bash
-cp configs/sphquant/qwen3.example.yaml configs/sphquant/qwen3.yaml
-uv run wvq sphquant optimize --config configs/sphquant/qwen3.yaml
+cp configs/sage/qwen3.example.yaml configs/sage/qwen3.yaml
+# Edit configs/sage/qwen3.yaml before running.
+uv run wvq sage run --config configs/sage/qwen3.yaml
 ```
 
-统一接口为 `wvq <method> <stage> --config <yaml>`。支持 `wvq --help`, `wvq <method> --help` 和 `wvq <method> <stage> --help` 获取帮助。
+This produces `exported_model/` under the configured `output_dir`.
+Local configuration files are Git-ignored.
 
-## 开发检查
+## Help
+
+```bash
+uv run wvq --help
+uv run wvq sage --help
+uv run wvq sage run --help
+```
+
+## Development
 
 ```bash
 uv run pytest
 uv run ruff check .
-uv run basedpyright
 uv run ruff format .
+uv run basedpyright
 ```
 
-- 更新依赖声明后先执行 `uv lock`，同步时使用对应 CUDA extra 和 `--locked`，避免隐式修改 lockfile。
-- 不要写 shell 胶水，为了实验方便写的 shell 脚本一律留存于本地。
-- 做新 idea 时开新分支。
+## License
+
+Project code is licensed under [GPL-3.0-only](LICENSE).
+Third-party licenses and the missing upstream UniSVQ license are recorded in
+[THIRD_PARTY.md](THIRD_PARTY.md).

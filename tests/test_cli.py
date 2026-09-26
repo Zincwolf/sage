@@ -169,6 +169,25 @@ def test_cli_has_nested_help(capsys: pytest.CaptureFixture[str]) -> None:
     assert "hessian" in capsys.readouterr().out
 
 
+@pytest.mark.parametrize(
+    "method,stage,description",
+    [
+        ("sage", "run", "Fixed direction-index bits when adaptive_bits is disabled"),
+        ("sage", "run", "Local Hugging Face model directory."),
+        ("sphquant", "optimize", "quantized student inputs and full-precision teacher targets"),
+        ("qtip", "run", "Cached Hugging Face Arrow training dataset directory"),
+        ("quip-sharp", "run", "dense teacher inputs and targets"),
+        ("unisvq", "run", "Precision for activation-statistics accumulation and storage"),
+        ("data", "calibration", "Local directory containing the tokenizer files"),
+    ],
+)
+def test_cli_help_uses_config_docstrings(method, stage, description, capsys):
+    with pytest.raises(SystemExit) as exit_info:
+        cli.main([method, stage, "--help"])
+    assert exit_info.value.code == 0
+    assert description in " ".join(capsys.readouterr().out.split())
+
+
 def test_cli_rejects_invalid_pair() -> None:
     with pytest.raises(SystemExit):
         cli.main(["data", "export", "--config", "data.yaml"])

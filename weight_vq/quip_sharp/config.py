@@ -9,6 +9,13 @@ from weight_vq.blockwise.config import BlockwiseConfig
 
 @dataclass(frozen=True)
 class QuIPSharpConfig(BlockwiseConfig):
+    """QuIP# W2 E8P blockwise quantization from a cached Arrow dataset.
+
+    Args:
+        min_expert_coverage: Minimum fraction of original calibration tokens needed
+            to use an expert's measured covariance. Insufficient coverage uses an identity metric.
+    """
+
     hessian_samples: int = 6144
     hessian_sequence_length: int = 2048
     sigma_reg: float = 0.01

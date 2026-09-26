@@ -13,6 +13,35 @@ from weight_vq.blockwise.artifacts import projection_layout
 
 @dataclass(frozen=True)
 class BlockwiseConfig:
+    """Shared calibration, Hessian, quantization, export, and validation configuration.
+
+    Args:
+        model: Local Hugging Face model directory.
+        dataset: Cached Hugging Face Arrow training dataset directory, containing
+            dataset_info.json and *-train-*-of-*.arrow shards.
+        output_dir: Root for calibration.pt, hessians/, checkpoints/, and exported_model/.
+        devices: CUDA device indices used by the blockwise pipeline.
+        seed: Seed for calibration sampling and quantization.
+        layer_start: First decoder layer to quantize, inclusive.
+        layer_end: Last decoder layer to quantize, exclusive; null selects model depth.
+        num_cpu_threads: CPU threads per worker.
+        model_dtype: Floating-point dtype used to load the source model.
+        hessian_samples: Sequences used to collect activation statistics.
+        hessian_sequence_length: Tokens per activation-statistics sequence.
+        train_samples: Sequences used for layer reconstruction.
+        validation_samples: Held-out sequences used for reconstruction validation.
+        sequence_length: Tokens per reconstruction sequence.
+        hessian_chunk_size: Calibration sequences processed per statistics chunk.
+        forward_microbatch_size: Sequences per teacher forward pass.
+        reconstruction_microbatch_size: Sequences per reconstruction replay microbatch.
+        replay_device: Storage device for cached replay tensors.
+        reconstruction_epochs: Reconstruction epochs using dense teacher inputs and targets.
+        learning_rate: Learning rate for ordinary reconstruction parameters.
+        susv_learning_rate: Learning rate for SU/SV scale parameters.
+        batch_size: Reconstruction batch size.
+        gradient_checkpointing: Enable gradient checkpointing during reconstruction.
+    """
+
     model: Path
     dataset: Path
     output_dir: Path

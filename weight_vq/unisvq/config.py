@@ -10,6 +10,16 @@ from weight_vq.blockwise.config import BlockwiseConfig
 
 @dataclass(frozen=True)
 class UniSVQConfig(BlockwiseConfig):
+    """UniSVQ W2 PTQ from a cached Arrow dataset, with layerwise reconstruction.
+
+    Args:
+        hessian_dtype: Precision for activation-statistics accumulation and storage.
+        min_expert_coverage: Minimum fraction of original calibration tokens needed
+            to use an expert's measured covariance. Insufficient coverage uses an identity metric.
+        gradient_accumulation_steps: Reconstruction microbatches per optimizer step.
+        early_stop: Reconstruction validation patience in epochs.
+    """
+
     hessian_samples: int = 1024
     hessian_sequence_length: int = 4096
     # Statistics accumulation/storage only; upstream quantizer precision is unchanged.

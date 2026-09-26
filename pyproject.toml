@@ -2,6 +2,8 @@
 name = "weight-vq"
 dynamic = ["version"]
 description = "Reproducible weight vector quantization pipelines"
+license = "GPL-3.0-only"
+license-files = ["LICENSE"]
 requires-python = ">=3.11,<3.12"
 dependencies = [
     "glog==0.3.1",
@@ -21,6 +23,8 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+# Deprecated and unmaintained: cu124 is retained for legacy environments.
+# Use cu128 for current model support and development.
 cu124 = [
     "quiptools-cuda",
     "datasets==2.20.0",

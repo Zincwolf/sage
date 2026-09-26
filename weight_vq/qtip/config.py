@@ -9,6 +9,13 @@ from weight_vq.blockwise.config import BlockwiseConfig
 
 @dataclass(frozen=True)
 class QTIPConfig(BlockwiseConfig):
+    """QTIP blockwise quantization from a cached Arrow dataset.
+
+    Args:
+        min_expert_coverage: Minimum fraction of original calibration tokens needed
+            to use an expert's measured Hessian. Insufficient coverage uses an identity metric.
+    """
+
     td_x: int = 16
     td_y: int = 16
     L: int = 16
