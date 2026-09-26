@@ -71,7 +71,9 @@ def test_model_contract_accepts_qwen3_and_ministral(monkeypatch: pytest.MonkeyPa
     assert _model_contract(Path("text")) == ("qwen3", (PROJECTIONS,) * 36)
     assert _model_contract(Path("ministral")) == ("mistral3", (PROJECTIONS,) * 40)
     for name in ("retired_vl", "other"):
-        with pytest.raises(ValueError, match=r"supports qwen3, Ministral-3 and Qwen3\.5, got"):
+        with pytest.raises(
+            ValueError, match=r"supports qwen3, qwen3_moe, Ministral-3 and Qwen3\.5, got"
+        ):
             _model_contract(Path(name))
 
 
@@ -109,6 +111,7 @@ def test_optimize_preserves_qwen3_text_recipe(
         assert arguments["sage_esg"] is True
         assert arguments["sage_adaptive_bits"] is True
         assert arguments["sage_energy_power"] == 0.75
+        assert arguments["sage_allow_partial"] is False
     else:
         assert not any(key.startswith("sage_") for key in arguments)
     assert arguments["params"] == ["radius:0.001,codebook:0.001"]
@@ -194,7 +197,8 @@ def test_export_runs_shared_converter_in_staging_directory(
 def test_validate_uses_causal_hf_api_and_target_statistics(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    model = nn.Module()
+    model: Any = nn.Module()
+    model.config = SimpleNamespace(model_type="qwen3")
     model.model = nn.Module()
     layer = nn.Module()
     layer.self_attn = nn.Module()

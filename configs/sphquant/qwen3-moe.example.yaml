@@ -1,0 +1,23 @@
+# Native HF Qwen3 MoE; all expert projections, never the router.
+model: /path/to/Qwen3-30B-A3B
+calibration: outputs/calibration/calibration.pt
+output_dir: outputs/sphquant/qwen3-moe
+device: 0
+
+# SPHQuant uses no activation weighting or adaptive bit allocation.
+codebook_bits: 6
+sample_size: 65536
+kmeans_iterations: 20
+
+# Sequential single-GPU reconstruction, then native HF dense QDQ export.
+epochs: 20
+learning_rate: 0.001
+batch_size: 16
+gradient_accumulation_steps: 1
+cache_shards: 8
+resume: true
+checkpointing: true
+seed: 0
+max_layers: null
+calibration_limit: null
+use_wandb: false

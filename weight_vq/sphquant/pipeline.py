@@ -11,6 +11,7 @@ from pathlib import Path
 
 from weight_vq import utils
 from weight_vq.blockwise.artifacts import projections
+from weight_vq.blockwise.models import language_backbone, layer_expert_count, projection_weight
 from weight_vq.calibration import load_calibration_metadata
 from weight_vq.sage.config import SAGEConfig
 from weight_vq.sphquant.config import SPHQuantConfig
@@ -47,6 +48,11 @@ def _model_contract(model: Path) -> tuple[str, tuple[tuple[str, ...], ...]]:
     hf_config = AutoConfig.from_pretrained(model, local_files_only=True, trust_remote_code=True)
     if hf_config.model_type == "qwen3":
         return "qwen3", (PROJECTIONS,) * hf_config.num_hidden_layers
+    if hf_config.model_type == "qwen3_moe":
+        return "qwen3_moe", tuple(
+            tuple(name for name, *_ in projections(layer_expert_count(hf_config, index)))
+            for index in range(hf_config.num_hidden_layers)
+        )
     if hf_config.model_type == "mistral3" and hf_config.text_config.model_type == "ministral3":
         return "mistral3", (PROJECTIONS,) * hf_config.text_config.num_hidden_layers
     if hf_config.model_type == "qwen3_5":
@@ -55,7 +61,8 @@ def _model_contract(model: Path) -> tuple[str, tuple[tuple[str, ...], ...]]:
             for layer_type in hf_config.text_config.layer_types
         )
     raise ValueError(
-        f"SPHQuant/SAGE supports qwen3, Ministral-3 and Qwen3.5, got {hf_config.model_type!r}"
+        f"SPHQuant/SAGE supports qwen3, qwen3_moe, Ministral-3 and Qwen3.5, "
+        f"got {hf_config.model_type!r}"
     )
 
 
@@ -134,6 +141,7 @@ def optimize(config: SPHQuantConfig) -> None:
             sage_esg=config.esg,
             sage_adaptive_bits=config.adaptive_bits,
             sage_energy_power=config.energy_power,
+            sage_allow_partial=config.allow_partial,
         )
 
     with _physical_device(config.device):
@@ -213,7 +221,7 @@ def validate(config: SPHQuantConfig) -> None:
                 else AutoModelForCausalLM
             ),
             weights=lambda model: (
-                (name, model.get_parameter(f"{name}.weight"))
+                (name, projection_weight(language_backbone(model).layers[index], projection))
                 for index in target_layers
                 for projection in layout[index]
                 for name in (f"{prefix}.layers.{index}.{projection}",)

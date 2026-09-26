@@ -1,0 +1,375 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Zincwolf <zincwolf@outlook.com>
+Date: Sat, 26 Sep 2026 10:59:08 +0800
+Subject: [PATCH] Support Qwen3 MoE in spherical quantization pipelines
+
+---
+ paroquant/cli/convert.py    |  16 +++++-
+ paroquant/cli/optimize.py   |  54 +++++++++++++++----
+ paroquant/optim/moe.py      |  60 +++++++++++++++++++++
+ paroquant/optim/util.py     |   4 +-
+ tests/test_spherical_moe.py | 103 ++++++++++++++++++++++++++++++++++++
+ 5 files changed, 224 insertions(+), 13 deletions(-)
+ create mode 100644 paroquant/optim/moe.py
+ create mode 100644 tests/test_spherical_moe.py
+
+diff --git a/paroquant/cli/convert.py b/paroquant/cli/convert.py
+index 2f04be1..66775c7 100644
+--- a/paroquant/cli/convert.py
++++ b/paroquant/cli/convert.py
+@@ -207,6 +207,7 @@ def _to_awq_buffers(
+ def _convert_pseudo(model: torch.nn.Module, result_dir: Path) -> int:
+     from paroquant.optim.sphlinear import SPHPseudoQuantizedLinear
+     from paroquant.optim.sagelinear import SAGEPseudoQuantizedLinear
++    from paroquant.optim.moe import split_work_experts
+ 
+     first_checkpoint = next(iter(sorted(result_dir.glob("*.pt"))), None)
+     sph_mode = False
+@@ -221,6 +222,12 @@ def _convert_pseudo(model: torch.nn.Module, result_dir: Path) -> int:
+     count = 0
+     for layer_idx, layer in enumerate(tqdm(blocks, desc="Pseudo-quantizing")):
+         layer = layer.cuda()
++        fused_experts = None
++        if sph_mode:
++            fused_experts = getattr(layer.mlp, "experts", None)
++            # Split after moving: these Linear weights are views of native fused
++            # tensors. Copy QDQ into them, then restore native HF storage below.
++            split_work_experts(layer)
+         modules: dict[str, torch.nn.Module] = {}
+         modules.update(get_spherical_linears(layer) if sph_mode else get_named_linears(layer))
+         if not sph_mode:
+@@ -229,10 +236,11 @@ def _convert_pseudo(model: torch.nn.Module, result_dir: Path) -> int:
+ 
+             modules.update(get_named_moe_experts(layer))
+ 
+-        for name, module in modules.items():
++        for name in modules:
+             pt_file = result_dir / f"{layer_idx}.{name}.pt"
+             if not pt_file.exists():
+                 continue
++            module = modules[name]
+             sd = torch.load(pt_file, weights_only=False, map_location="cuda")
+             if isinstance(module, torch.nn.Linear):
+                 if "sage_version" in sd:
+@@ -260,6 +268,12 @@ def _convert_pseudo(model: torch.nn.Module, result_dir: Path) -> int:
+                 module.gate_up_proj.data.copy_(qexperts.gate_up_proj.data)
+                 module.down_proj.data.copy_(qexperts.down_proj.data)
+             count += 1
++            del module
++        if sph_mode and fused_experts is not None:
++            layer.mlp.experts = fused_experts
++        # Drop split CUDA views before moving native storage off device, so they
++        # cannot retain the preceding block's fused allocation on the next step.
++        del modules
+         layer.cpu()
+     return count
+ 
+diff --git a/paroquant/cli/optimize.py b/paroquant/cli/optimize.py
+index 8d82a42..2192efa 100644
+--- a/paroquant/cli/optimize.py
++++ b/paroquant/cli/optimize.py
+@@ -13,6 +13,7 @@ import torch.nn as nn
+ import wandb
+ from tqdm import tqdm
+ 
++from paroquant.optim.moe import split_work_experts
+ from paroquant.optim.train import optimize_module
+ from paroquant.optim.sphlinear import SPHPseudoQuantizedLinear
+ from paroquant.optim.sagelinear import SAGEPseudoQuantizedLinear
+@@ -85,6 +86,8 @@ class Config:
+     sage_esg: bool = True
+     sage_adaptive_bits: bool = True
+     sage_energy_power: float = 0.75
++    # Allow unmeasured ABS entries to use the configured default bit split.
++    sage_allow_partial: bool = False
+ 
+     # Number of shards to cache the input/output tensors. At any time, only one shard
+     # will be moved to GPU for optimization. The rest will be kept in CPU memory.
+@@ -317,6 +320,10 @@ def main():
+         if args.max_layers is not None and layer_idx >= args.max_layers:
+             break
+         empty_cache()
++        if args.method in ("sphquant", "sage"):
++            # This process owns its decoder blocks; shared blockwise teachers are
++            # never modified. Keep HF routing, exposing expert Linear calls only.
++            split_work_experts(layer)
+         logger.info(f"Capturing original layer output...")
+         # Original output of this layer.
+         og_layer_args_batches = make_layer_args_batches(
+@@ -357,10 +364,16 @@ def main():
+             for handle in handles:
+                 handle.remove()
+         channel_energy = {
+-            name: (energy / count).cpu()
++            name: (energy / max(count, 1)).cpu()
+             for name, (energy, count) in energy_statistics.items()
+-            if count
+         }
++        unmeasured = []
++        if args.method == "sage" and args.sage_adaptive_bits:
++            unmeasured = [
++                name for name in get_linears(layer)
++                if name not in args.skipped_modules
++                and energy_statistics.get(name, (None, 0))[1] == 0
++            ]
+         del energy_statistics
+         og_layer_val_output_batches = forward_layer_batch(
+             layer,
+@@ -430,6 +443,17 @@ def main():
+         logger.info(f"Skipped linear modules: {skipped_linear_names}")
+         logger.info(f"Skipped MoE expert modules: {skipped_expert_names}")
+ 
++        if not all_files_exist and unmeasured:
++            if not args.sage_allow_partial:
++                raise ValueError(
++                    f"Layer {layer_idx}: {len(unmeasured)} matrices saw no tokens during "
++                    f"calibration: {unmeasured}. ABS requires coverage; increase calibration "
++                    "or explicitly set sage_allow_partial to use the configured default split."
++                )
++            logger.warning(
++                f"Layer {layer_idx}: ABS leaves {len(unmeasured)} matrices unmeasured; "
++                f"using configured {args.sph_codebook_bits}-bit codebooks: {unmeasured}"
++            )
+         named_pseudo_modules: dict[str, nn.Module] = {}
+         format_plan = {}
+         for name, old_module in optim_modules.items():
+@@ -470,22 +494,29 @@ def main():
+             old_module.to(device)
+             if isinstance(old_module, nn.Linear):
+                 if args.method == "sage":
++                    energy = channel_energy.get(name)
++                    if args.sage_esg and energy is None:
++                        logger.warning(
++                            f"{layer_idx}.{name}: no teacher activation; ESG falls back "
++                            "to unweighted quantization in natural channel order"
++                        )
+                     new_module = SAGEPseudoQuantizedLinear(
+                         old_module,
+-                        channel_energy=channel_energy.get(name),
+-                        esg=args.sage_esg,
+-                        adaptive_bits=args.sage_adaptive_bits,
++                        channel_energy=energy,
++                        esg=args.sage_esg and energy is not None,
++                        adaptive_bits=args.sage_adaptive_bits and name not in unmeasured,
+                         energy_power=args.sage_energy_power,
+                         sample_size=args.sph_sample_size,
+                         kmeans_iterations=args.sph_kmeans_iterations,
+                         codebook_bits=args.sph_codebook_bits,
+                         seed=args.seed + layer_idx,
+                     )
+-                    format_plan[name] = {
+-                        "codebook_bits": 10 - int(new_module.radius_bits),
+-                        "radius_bits": int(new_module.radius_bits),
+-                        "candidate_errors": new_module.candidate_errors,
+-                    }
++                    if name not in unmeasured:
++                        format_plan[name] = {
++                            "codebook_bits": 10 - int(new_module.radius_bits),
++                            "radius_bits": int(new_module.radius_bits),
++                            "candidate_errors": new_module.candidate_errors,
++                        }
+                 elif args.method == "sphquant":
+                     new_module = SPHPseudoQuantizedLinear(
+                         old_module,
+@@ -568,6 +599,9 @@ def main():
+ 
+         if not all_files_exist:
+             if args.method == "sage":
++                if unmeasured:
++                    format_plan["unmeasured"] = unmeasured
++                    format_plan["matrices_without_activation"] = len(unmeasured)
+                 (output_dir / f"{layer_idx}.format.json").write_text(
+                     json.dumps(format_plan, indent=2) + "\n"
+                 )
+diff --git a/paroquant/optim/moe.py b/paroquant/optim/moe.py
+new file mode 100644
+index 0000000..c4de07c
+--- /dev/null
++++ b/paroquant/optim/moe.py
+@@ -0,0 +1,60 @@
++"""Qwen3 MoE work-layer views shared by spherical and blockwise quantizers."""
++
++from typing import Any
++
++import torch
++from torch import nn
++
++
++class LinearExperts(nn.ModuleList):
++    """Expose Linear calls while retaining native eager expert dispatch."""
++
++    def forward(
++        self, hidden_states: torch.Tensor, top_k_index: torch.Tensor, top_k_weights: torch.Tensor
++    ) -> torch.Tensor:
++        result = torch.zeros_like(hidden_states)
++        with torch.no_grad():
++            mask = torch.nn.functional.one_hot(top_k_index, num_classes=len(self)).permute(2, 1, 0)
++            hits = mask.sum(dim=(-1, -2)).nonzero().flatten().tolist()
++        for index in hits:
++            slot, token = torch.where(mask[index])
++            output = self[index](hidden_states[token]) * top_k_weights[token, slot, None]
++            result.index_add_(0, token, output.to(result.dtype))
++        return result
++
++
++def split_work_experts(layer: Any) -> None:
++    """Expose views of fused experts on a private decoder, never a shared teacher."""
++    experts = getattr(layer.mlp, "experts", None)
++    if experts is None:
++        return
++    # HF's experts_implementation changes dispatch, not its fused parameter layout.
++    from transformers.models.qwen3_moe.modeling_qwen3_moe import Qwen3MoeExperts, Qwen3MoeMLP
++
++    if not isinstance(experts, Qwen3MoeExperts):
++        return
++    fused: Any = experts
++    modules = LinearExperts()
++    for index in range(fused.num_experts):
++        with torch.device("meta"):
++            expert = Qwen3MoeMLP(fused.config, intermediate_size=fused.intermediate_dim)
++        gate, up = fused.gate_up_proj[index].chunk(2, dim=0)
++        expert.gate_proj.weight = nn.Parameter(gate, requires_grad=gate.requires_grad)
++        expert.up_proj.weight = nn.Parameter(up, requires_grad=up.requires_grad)
++        expert.down_proj.weight = nn.Parameter(
++            fused.down_proj[index], requires_grad=fused.down_proj.requires_grad
++        )
++        modules.append(expert)
++    layer.mlp.experts = modules
++
++
++def projection_weight(layer: Any, attribute: str) -> torch.Tensor:
++    """Access a dense projection in native HF storage, including fused experts."""
++    if attribute.startswith("mlp.experts."):
++        _, _, expert, projection = attribute.split(".")
++        experts = layer.mlp.experts
++        if projection == "down_proj":
++            return experts.down_proj[int(expert)]
++        gate, up = experts.gate_up_proj[int(expert)].chunk(2, dim=0)
++        return gate if projection == "gate_proj" else up
++    return layer.get_parameter(f"{attribute}.weight")
+diff --git a/paroquant/optim/util.py b/paroquant/optim/util.py
+index 8222261..6f2bb0a 100644
+--- a/paroquant/optim/util.py
++++ b/paroquant/optim/util.py
+@@ -49,10 +49,10 @@ def get_named_linears(module: nn.Module, subclass: type[_Linear_T] = nn.Linear)
+ 
+ 
+ def get_spherical_linears(module: nn.Module) -> dict[str, nn.Linear]:
+-    # Recurrent decay/update controls remain dense in both SPHQuant and SAGE.
++    # Recurrent decay/update controls and MoE routers remain dense in both methods.
+     return {
+         name: linear for name, linear in get_named_linears(module).items()
+-        if name not in ("linear_attn.in_proj_a", "linear_attn.in_proj_b")
++        if name not in ("linear_attn.in_proj_a", "linear_attn.in_proj_b", "mlp.gate")
+     }
+ 
+ 
+diff --git a/tests/test_spherical_moe.py b/tests/test_spherical_moe.py
+new file mode 100644
+index 0000000..688873d
+--- /dev/null
++++ b/tests/test_spherical_moe.py
+@@ -0,0 +1,103 @@
++"""Spherical QDQ uses expert Linear views without changing HF routing/storage."""
++
++from copy import deepcopy
++
++import pytest
++import torch
++from paroquant.cli.convert import _convert_pseudo
++from paroquant.optim.moe import projection_weight, split_work_experts
++from paroquant.optim.sagelinear import SAGEPseudoQuantizedLinear
++from paroquant.optim.sphlinear import SPHPseudoQuantizedLinear
++from paroquant.optim.util import get_spherical_linears
++from transformers import Qwen3MoeConfig, Qwen3MoeForCausalLM
++
++
++@pytest.fixture
++def native_moe():
++    torch.set_num_threads(2)
++    torch.manual_seed(17)
++    config = Qwen3MoeConfig(
++        vocab_size=32,
++        hidden_size=128,
++        intermediate_size=256,
++        moe_intermediate_size=128,
++        num_hidden_layers=1,
++        num_attention_heads=4,
++        num_key_value_heads=2,
++        num_experts=4,
++        num_experts_per_tok=2,
++    )
++    config.update({"head_dim": 32})
++    model = Qwen3MoeForCausalLM(config).eval()
++    model.set_experts_implementation("eager")
++    return model
++
++
++def test_expert_views_follow_top_two_routes_and_backpropagate(native_moe):
++    original = native_moe.model.layers[0]
++    work = deepcopy(original)
++    split_work_experts(work)
++    x = torch.randn(5, 128)
++    routes = torch.tensor([[0, 1], [1, 0], [0, 2], [2, 1], [1, 2]])
++    weights = torch.rand(5, 2).softmax(-1)
++    expected = original.mlp.experts(x, routes, weights)
++    actual = work.mlp.experts(x, routes, weights)
++    torch.testing.assert_close(actual, expected)
++    actual.square().sum().backward()
++    for index, expert in enumerate(work.mlp.experts):
++        for parameter in expert.parameters():
++            assert (parameter.grad is None) == (index == 3)
++    linears = get_spherical_linears(work)
++    assert len(linears) == 4 + 4 * 3
++    assert "mlp.gate" not in linears
++    for name, linear in linears.items():
++        torch.testing.assert_close(linear.weight, projection_weight(original, name), atol=0, rtol=0)
++    assert work.mlp.gate is not original.mlp.gate
++    assert all(parameter.grad is None for parameter in original.parameters())
++
++
++@pytest.mark.skipif(not torch.cuda.is_available(), reason="dense conversion uses CUDA")
++@pytest.mark.parametrize("method", ["sphquant", "sage"])
++@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
++def test_mixed_expert_formats_copy_into_native_storage(native_moe, tmp_path, method, dtype):
++    native_moe.to(dtype)
++    original = {name: value.clone() for name, value in native_moe.state_dict().items()}
++    expected = deepcopy(native_moe)
++    work = deepcopy(native_moe.model.layers[0]).cuda()
++    split_work_experts(work)
++    targets = ["mlp.experts.0.gate_proj", "mlp.experts.1.up_proj", "mlp.experts.2.down_proj"]
++    pseudo_class = SAGEPseudoQuantizedLinear if method == "sage" else SPHPseudoQuantizedLinear
++    for index, name in enumerate(targets):
++        kwargs = {}
++        if method == "sage":
++            kwargs = {"channel_energy": torch.logspace(-2, 2, 128), "adaptive_bits": False}
++        pseudo = pseudo_class(
++            work.get_submodule(name),
++            codebook_bits=6 + index,
++            sample_size=256,
++            kmeans_iterations=1,
++            seed=17,
++            **kwargs,
++        )
++        torch.save(pseudo.state_dict(), tmp_path / f"0.{name}.pt")
++        projection_weight(expected.model.layers[0], name).data.copy_(pseudo.pseudo_weight().cpu())
++    fused = native_moe.model.layers[0].mlp.experts
++    assert _convert_pseudo(native_moe, tmp_path) == 3
++    assert native_moe.model.layers[0].mlp.experts is fused
++    assert native_moe.state_dict().keys() == original.keys()
++    for name, value in native_moe.state_dict().items():
++        torch.testing.assert_close(value, expected.state_dict()[name], atol=0, rtol=0)
++        assert value.device.type == "cpu"
++    # An unconverted expert and the router are preserved exactly.
++    torch.testing.assert_close(
++        fused.gate_up_proj[3],
++        original["model.layers.0.mlp.experts.gate_up_proj"][3],
++        atol=0,
++        rtol=0,
++    )
++    torch.testing.assert_close(
++        native_moe.model.layers[0].mlp.gate.weight,
++        original["model.layers.0.mlp.gate.weight"],
++        atol=0,
++        rtol=0,
++    )

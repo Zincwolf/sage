@@ -14,4 +14,6 @@ class SAGEConfig(SPHQuantConfig):
     adaptive_bits: bool = True
     # Tempering exponent used only for fitting, never for ABS scoring.
     energy_power: float = 0.75
-    # Inherited codebook_bits is used only when adaptive_bits is false.
+    # Permit ABS to leave unrouted matrices unmeasured, using codebook_bits.
+    allow_partial: bool = False
+    # Inherited codebook_bits applies without ABS or to allowed unmeasured matrices.

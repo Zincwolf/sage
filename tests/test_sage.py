@@ -14,7 +14,7 @@ def test_sage_component_ablation_options(monkeypatch, tmp_path, esg, adaptive_bi
     path = tmp_path / "sage.yaml"
     path.write_text(
         "model: /models/qwen3\ncalibration: /data/calibration.pt\noutput_dir: outputs/sage\n"
-        "energy_power: 0.625\n"
+        "energy_power: 0.625\nallow_partial: true\n"
     )
     received = []
     monkeypatch.setitem(cli.STAGES, ("sage", "optimize"), (received.append, SAGEConfig))
@@ -36,6 +36,7 @@ def test_sage_component_ablation_options(monkeypatch, tmp_path, esg, adaptive_bi
             esg=esg,
             adaptive_bits=adaptive_bits,
             energy_power=0.625,
+            allow_partial=True,
         )
     ]
 
@@ -64,6 +65,7 @@ def test_sage_defaults_are_independent_of_sphquant():
     )
     assert sage.esg and sage.adaptive_bits
     assert sage.energy_power == 0.75
+    assert not sage.allow_partial
     assert baseline.codebook_bits == 6
     assert not hasattr(baseline, "esg")
     assert replace(sage, esg=False, adaptive_bits=False).checkpoints == Path("sage/checkpoints")
