@@ -1,0 +1,208 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Zincwolf <zincwolf@outlook.com>
+Date: Sat, 26 Sep 2026 10:17:15 +0800
+Subject: [PATCH] Preserve complete Qwen3.5 wrappers in spherical pipelines
+
+---
+ paroquant/cli/convert.py  | 14 ++++++++++++--
+ paroquant/cli/optimize.py |  6 ++++--
+ paroquant/optim/util.py   | 15 +++++++++++++--
+ tests/test_sphconvert.py  | 38 ++++++++++++++++++++++++++++++++++----
+ 4 files changed, 63 insertions(+), 10 deletions(-)
+
+diff --git a/paroquant/cli/convert.py b/paroquant/cli/convert.py
+index 8d9fa6f..2f04be1 100644
+--- a/paroquant/cli/convert.py
++++ b/paroquant/cli/convert.py
+@@ -10,7 +10,8 @@ from typing import Any
+ 
+ import torch
+ from tqdm import tqdm
+-from paroquant.optim.util import get_named_linears, set_module_by_name, load_model
++from safetensors import safe_open
++from paroquant.optim.util import get_named_linears, get_spherical_linears, set_module_by_name, load_model
+ 
+ 
+ _AWQ_REORDER = (0, 2, 4, 6, 1, 3, 5, 7)
+@@ -221,7 +222,7 @@ def _convert_pseudo(model: torch.nn.Module, result_dir: Path) -> int:
+     for layer_idx, layer in enumerate(tqdm(blocks, desc="Pseudo-quantizing")):
+         layer = layer.cuda()
+         modules: dict[str, torch.nn.Module] = {}
+-        modules.update(get_named_linears(layer))
++        modules.update(get_spherical_linears(layer) if sph_mode else get_named_linears(layer))
+         if not sph_mode:
+             # Only ParoQuant needs the compiled rotation/MoE dependencies.
+             from paroquant.optim.qexperts import get_named_moe_experts
+@@ -532,6 +533,15 @@ def main() -> None:
+     source_non_md = _copy_source_non_md_files(source_dir, output_path)
+     _remove_safetensor_files(output_path)
+ 
++    if args.mode == "pseudo" and model.config.model_type == "qwen3_5":
++        # HF intentionally ignores MTP modules. Preserve these source tensors,
++        # as in the parent blockwise exporter, without quantizing them.
++        save_state_dict = model.state_dict()
++        for shard_path in source_dir.glob("*.safetensors"):
++            with safe_open(shard_path, framework="pt", device="cpu") as shard:
++                for key in shard.keys():
++                    if key.startswith("mtp."):
++                        save_state_dict[key] = shard.get_tensor(key)
+     model.save_pretrained(output_path, safe_serialization=True, state_dict=save_state_dict)
+ 
+     # Restore original non-MD assets in case save_pretrained overwrote any.
+diff --git a/paroquant/cli/optimize.py b/paroquant/cli/optimize.py
+index fd01d54..8d82a42 100644
+--- a/paroquant/cli/optimize.py
++++ b/paroquant/cli/optimize.py
+@@ -26,6 +26,7 @@ from paroquant.optim.util import (
+     get_mixed_calib_dataset,
+     capture_layer_inputs_and_args,
+     get_named_linears,
++    get_spherical_linears,
+     empty_cache,
+     logger,
+     CachedTensorShards,
+@@ -116,6 +117,7 @@ def setup_wandb(args: Config) -> wandb.Run | None:
+ 
+ def main():
+     args = simple_parsing.parse(Config, add_option_string_dash_variants=simple_parsing.DashVariant.DASH)
++    get_linears = get_spherical_linears if args.method in ("sphquant", "sage") else get_named_linears
+     print(args)
+ 
+     # Store the results in a subdirectory.
+@@ -340,7 +342,7 @@ def main():
+ 
+         handles = []
+         if args.method == "sage" and (args.sage_esg or args.sage_adaptive_bits):
+-            for name, module in get_named_linears(layer).items():
++            for name, module in get_linears(layer).items():
+                 if name not in args.skipped_modules:
+                     handles.append(module.register_forward_hook(partial(collect_energy, name)))
+         try:
+@@ -394,7 +396,7 @@ def main():
+         for param in layer.parameters():
+             param.requires_grad = False
+ 
+-        linear_modules = get_named_linears(layer)
++        linear_modules = get_linears(layer)
+         # Keep ParoQuant's compiled-kernel imports out of the SPHQuant path.
+         if args.method in ("sphquant", "sage"):
+             expert_modules = {}
+diff --git a/paroquant/optim/util.py b/paroquant/optim/util.py
+index 4366dba..8222261 100644
+--- a/paroquant/optim/util.py
++++ b/paroquant/optim/util.py
+@@ -48,6 +48,14 @@ def get_named_linears(module: nn.Module, subclass: type[_Linear_T] = nn.Linear)
+     return {name: m for name, m in module.named_modules() if isinstance(m, subclass)}
+ 
+ 
++def get_spherical_linears(module: nn.Module) -> dict[str, nn.Linear]:
++    # Recurrent decay/update controls remain dense in both SPHQuant and SAGE.
++    return {
++        name: linear for name, linear in get_named_linears(module).items()
++        if name not in ("linear_attn.in_proj_a", "linear_attn.in_proj_b")
++    }
++
++
+ def get_module_by_name(module, module_name):
+     for name, m in module.named_modules():
+         if name == module_name:
+@@ -71,8 +79,11 @@ def set_module_by_name(layer, name, new_module):
+ 
+ def load_model(model_path: str, device_map: str | None = None, dtype=torch.float32, **kwargs) -> nn.Module:
+     config = AutoConfig.from_pretrained(model_path, trust_remote_code=kwargs.get("trust_remote_code", False))
+-    # Preserve the complete Ministral wrapper; calibration remains text-only.
+-    loader = AutoModelForImageTextToText if config.model_type == "mistral3" else AutoModelForCausalLM
++    # Preserve complete wrappers; calibration remains text-only.
++    loader = (
++        AutoModelForImageTextToText
++        if config.model_type in ("mistral3", "qwen3_5") else AutoModelForCausalLM
++    )
+     return loader.from_pretrained(
+         model_path, config=config, device_map=device_map, dtype=dtype, **kwargs
+     )
+diff --git a/tests/test_sphconvert.py b/tests/test_sphconvert.py
+index b1e363f..7227abd 100644
+--- a/tests/test_sphconvert.py
++++ b/tests/test_sphconvert.py
+@@ -2,10 +2,12 @@ import sys
+ 
+ import pytest
+ import torch
++from safetensors import safe_open
+ from transformers import (
+     AutoModelForCausalLM, AutoModelForImageTextToText,
+     Qwen3Config, Qwen3ForCausalLM,
+     Ministral3Config, Mistral3Config, Mistral3ForConditionalGeneration, PixtralVisionConfig,
++    Qwen3_5Config, Qwen3_5TextConfig, Qwen3_5VisionConfig, Qwen3_5ForConditionalGeneration,
+ )
+ 
+ from paroquant.cli import convert
+@@ -14,7 +16,7 @@ from paroquant.optim.sagelinear import SAGEPseudoQuantizedLinear
+ from paroquant.optim.util import load_model, get_blocks
+ 
+ 
+-@pytest.fixture(params=["qwen3", "ministral3"])
++@pytest.fixture(params=["qwen3", "ministral3", "qwen3_5"])
+ def source_model(tmp_path, request):
+     model = Qwen3ForCausalLM(
+         Qwen3Config(
+@@ -44,8 +46,29 @@ def source_model(tmp_path, request):
+         model = Mistral3ForConditionalGeneration(
+             Mistral3Config(text_config=text, vision_config=vision)
+         ).eval()
++    elif request.param == "qwen3_5":
++        text = Qwen3_5TextConfig(
++            vocab_size=64, hidden_size=128, intermediate_size=256,
++            num_hidden_layers=1, num_attention_heads=4, num_key_value_heads=2,
++            head_dim=32, layer_types=["full_attention"],
++            rope_parameters={
++                "rope_type": "default", "rope_theta": 10000.0,
++                "partial_rotary_factor": 1.0, "mrope_section": [4, 6, 6],
++            },
++        )
++        vision = Qwen3_5VisionConfig(
++            depth=1, hidden_size=32, intermediate_size=64, num_heads=4,
++            patch_size=4, temporal_patch_size=1, spatial_merge_size=2,
++            out_hidden_size=128, num_position_embeddings=16,
++        )
++        model = Qwen3_5ForConditionalGeneration(
++            Qwen3_5Config(text_config=text, vision_config=vision)
++        ).eval()
+     source = tmp_path / "source"
+-    model.save_pretrained(source)
++    state = model.state_dict()
++    if request.param == "qwen3_5":
++        state["mtp.fc.weight"] = torch.randn(128, 256)
++    model.save_pretrained(source, state_dict=state)
+     return source, model
+ 
+ 
+@@ -81,7 +104,7 @@ def test_text_pseudo_export_roundtrip(source_model, tmp_path, monkeypatch, metho
+                 projection, sample_size=256, kmeans_iterations=1, codebook_bits=6 + index, seed=0
+             )
+         torch.save(quantized.state_dict(), result_dir / f"0.self_attn.{name}.pt")
+-        prefix = "model.language_model" if model.config.model_type == "mistral3" else "model"
++        prefix = "model.language_model" if model.config.model_type in ("mistral3", "qwen3_5") else "model"
+         expected_weights[f"{prefix}.layers.0.self_attn.{name}.weight"] = quantized.pseudo_weight()
+     exported = tmp_path / "exported"
+     monkeypatch.setattr(
+@@ -101,7 +124,7 @@ def test_text_pseudo_export_roundtrip(source_model, tmp_path, monkeypatch, metho
+     )
+     convert.main()
+ 
+-    loader = AutoModelForImageTextToText if model.config.model_type == "mistral3" else AutoModelForCausalLM
++    loader = AutoModelForImageTextToText if model.config.model_type in ("mistral3", "qwen3_5") else AutoModelForCausalLM
+     restored = loader.from_pretrained(exported, local_files_only=True).eval()
+     for key, value in restored.state_dict().items():
+         torch.testing.assert_close(value, expected_weights.get(key, model.state_dict()[key]))
+@@ -109,3 +132,10 @@ def test_text_pseudo_export_roundtrip(source_model, tmp_path, monkeypatch, metho
+         output = restored(torch.randint(0, 64, (1, 8)), use_cache=False)
+     assert torch.isfinite(output.logits).all()
+     assert "quantization_config" not in restored.config.to_dict()
++    if model.config.model_type == "qwen3_5":
++        with safe_open(source / "model.safetensors", framework="pt") as original:
++            with safe_open(exported / "model.safetensors", framework="pt") as artifact:
++                torch.testing.assert_close(
++                    artifact.get_tensor("mtp.fc.weight"), original.get_tensor("mtp.fc.weight"),
++                    atol=0, rtol=0,
++                )

@@ -47,9 +47,13 @@ def create_checkpoints(config: SPHQuantConfig) -> None:
         path.touch()
 
 
-def test_model_contract_accepts_only_qwen3(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_model_contract_accepts_qwen3_and_ministral(monkeypatch: pytest.MonkeyPatch) -> None:
     configs = {
         "text": SimpleNamespace(model_type="qwen3", num_hidden_layers=36),
+        "ministral": SimpleNamespace(
+            model_type="mistral3",
+            text_config=SimpleNamespace(model_type="ministral3", num_hidden_layers=40),
+        ),
         "retired_vl": SimpleNamespace(model_type="qwen3_vl"),
         "other": SimpleNamespace(model_type="llama"),
     }
@@ -64,9 +68,10 @@ def test_model_contract_accepts_only_qwen3(monkeypatch: pytest.MonkeyPatch) -> N
     fake_transformers.AutoConfig = AutoConfig  # type: ignore[attr-defined]
     monkeypatch.setitem(sys.modules, "transformers", fake_transformers)
 
-    assert _model_contract(Path("text")) == 36
+    assert _model_contract(Path("text")) == ("qwen3", (PROJECTIONS,) * 36)
+    assert _model_contract(Path("ministral")) == ("mistral3", (PROJECTIONS,) * 40)
     for name in ("retired_vl", "other"):
-        with pytest.raises(ValueError, match="supports only qwen3, got"):
+        with pytest.raises(ValueError, match=r"supports qwen3, Ministral-3 and Qwen3\.5, got"):
             _model_contract(Path(name))
 
 
@@ -87,7 +92,9 @@ def test_optimize_preserves_qwen3_text_recipe(
     monkeypatch.setitem(sys.modules, "paroquant", ModuleType("paroquant"))
     monkeypatch.setitem(sys.modules, "paroquant.cli", fake_cli)
     monkeypatch.setitem(sys.modules, "paroquant.cli.optimize", fake_module)
-    monkeypatch.setattr("weight_vq.sphquant.pipeline._model_contract", lambda _model: 36)
+    monkeypatch.setattr(
+        "weight_vq.sphquant.pipeline._model_contract", lambda _model: ("qwen3", (PROJECTIONS,) * 36)
+    )
     monkeypatch.setattr(
         "weight_vq.sphquant.pipeline.load_calibration_metadata",
         lambda _path: CalibrationMetadata(1920, 128, 2048),
@@ -125,16 +132,18 @@ def test_optimize_preserves_qwen3_text_recipe(
 def test_missing_checkpoints_uses_model_layer_count(tmp_path: Path) -> None:
     config = smoke_config(tmp_path)
     create_checkpoints(config)
-    assert missing_checkpoints(config, model_layers=36) == []
+    assert missing_checkpoints(config, layout=(PROJECTIONS,) * 36) == []
     missing = checkpoint_path(config, 0, "mlp.down_proj")
     missing.unlink()
-    assert missing_checkpoints(config, model_layers=36) == [missing]
+    assert missing_checkpoints(config, layout=(PROJECTIONS,) * 36) == [missing]
 
 
 def test_export_rejects_incomplete_checkpoints(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    monkeypatch.setattr("weight_vq.sphquant.pipeline._model_contract", lambda _model: 36)
+    monkeypatch.setattr(
+        "weight_vq.sphquant.pipeline._model_contract", lambda _model: ("qwen3", (PROJECTIONS,) * 36)
+    )
     with pytest.raises(FileNotFoundError, match="missing 7 SPHQuant checkpoints"):
         export(smoke_config(tmp_path))
 
@@ -157,7 +166,9 @@ def test_export_runs_shared_converter_in_staging_directory(
     monkeypatch.setitem(sys.modules, "paroquant", ModuleType("paroquant"))
     monkeypatch.setitem(sys.modules, "paroquant.cli", fake_cli)
     monkeypatch.setitem(sys.modules, "paroquant.cli.convert", fake_converter)
-    monkeypatch.setattr("weight_vq.sphquant.pipeline._model_contract", lambda _model: 36)
+    monkeypatch.setattr(
+        "weight_vq.sphquant.pipeline._model_contract", lambda _model: ("qwen3", (PROJECTIONS,) * 36)
+    )
     original_argv = sys.argv
 
     config = smoke_config(tmp_path)
@@ -202,8 +213,11 @@ def test_validate_uses_causal_hf_api_and_target_statistics(
 
     fake_transformers = ModuleType("transformers")
     fake_transformers.AutoModelForCausalLM = AutoCausal  # type: ignore[attr-defined]
+    fake_transformers.AutoModelForImageTextToText = object()  # type: ignore[attr-defined]
     monkeypatch.setitem(sys.modules, "transformers", fake_transformers)
-    monkeypatch.setattr("weight_vq.sphquant.pipeline._model_contract", lambda _model: 36)
+    monkeypatch.setattr(
+        "weight_vq.sphquant.pipeline._model_contract", lambda _model: ("qwen3", (PROJECTIONS,) * 36)
+    )
 
     config = smoke_config(tmp_path)
     validate(config)

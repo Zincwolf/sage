@@ -93,6 +93,7 @@ def test_released_defaults_and_hessian_precision(tiny_unisvq):
     assert fp64.calibration_recipe() == defaults.calibration_recipe()
     assert fp64.recipe(model_family="qwen3", layer_end=1)["hessian_dtype"] == "float64"
     dense_recipe = defaults.recipe(model_family="qwen3", layer_end=1)
+    assert dense_recipe["hadamard"] == "upstream-128-block"
     assert "min_expert_coverage" not in dense_recipe and "moe_protocol" not in dense_recipe
     moe_recipe = defaults.recipe(model_family="qwen3_moe", layer_end=1)
     assert moe_recipe["min_expert_coverage"] == 0
@@ -221,7 +222,7 @@ def test_real_ldlq_and_saved_dense_decode(tune_iters):
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="Released Linear requires CUDA")
-@pytest.mark.parametrize("shape", [(768, 2048), (2048, 768), (32, 2560)])
+@pytest.mark.parametrize("shape", [(768, 2048), (2048, 768)])
 def test_real_projection_ldlq_and_backward(shape):
     from unisvq import codebook
     from unisvq import utils as upstream_utils

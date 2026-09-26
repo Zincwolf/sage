@@ -1,0 +1,164 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Zincwolf <zincwolf@outlook.com>
+Date: Fri, 25 Sep 2026 17:50:53 +0800
+Subject: [PATCH] Preserve complete Ministral wrappers in spherical pipelines
+
+---
+ paroquant/cli/convert.py |  9 ++++-----
+ paroquant/optim/util.py  | 10 +++++++---
+ tests/test_sphconvert.py | 39 +++++++++++++++++++++++++++++++--------
+ 3 files changed, 42 insertions(+), 16 deletions(-)
+
+diff --git a/paroquant/cli/convert.py b/paroquant/cli/convert.py
+index 82ed0b0..8d9fa6f 100644
+--- a/paroquant/cli/convert.py
++++ b/paroquant/cli/convert.py
+@@ -10,9 +10,7 @@ from typing import Any
+ 
+ import torch
+ from tqdm import tqdm
+-from transformers import AutoModelForCausalLM
+-
+-from paroquant.optim.util import get_named_linears, set_module_by_name
++from paroquant.optim.util import get_named_linears, set_module_by_name, load_model
+ 
+ 
+ _AWQ_REORDER = (0, 2, 4, 6, 1, 3, 5, 7)
+@@ -111,7 +109,7 @@ def _load_model(model_id: str, device_map: str = "cpu") -> torch.nn.Module:
+         low_cpu_mem_usage=True,
+         trust_remote_code=True,
+     )
+-    return AutoModelForCausalLM.from_pretrained(model_id, **kwargs)
++    return load_model(model_id, **kwargs)
+ 
+ 
+ def _get_blocks(model: torch.nn.Module):
+@@ -516,7 +514,8 @@ def main() -> None:
+         raise FileNotFoundError(f"Result directory not found: {result_dir}")
+ 
+     source_dir = _resolve_source_dir(args.model)
+-    model = _load_model(str(source_dir), device_map="cpu" if args.mode == "real" else "cuda")
++    # Only the current decoder block needs CUDA, not the multimodal wrapper.
++    model = _load_model(str(source_dir), device_map="cpu")
+ 
+     quant_config: dict[str, Any] | None = None
+     save_state_dict: dict[str, torch.Tensor] | None = None
+diff --git a/paroquant/optim/util.py b/paroquant/optim/util.py
+index 91b1bbd..4366dba 100644
+--- a/paroquant/optim/util.py
++++ b/paroquant/optim/util.py
+@@ -11,7 +11,7 @@ import torch
+ import torch.nn as nn
+ from datasets import load_dataset
+ from tqdm import tqdm
+-from transformers import AutoModelForCausalLM, AutoTokenizer, AutoConfig
++from transformers import AutoModelForCausalLM, AutoModelForImageTextToText, AutoTokenizer, AutoConfig
+ 
+ 
+ RETAINED_KWARG_KEYS = ("shared_kv_states",)
+@@ -70,8 +70,12 @@ def set_module_by_name(layer, name, new_module):
+ 
+ 
+ def load_model(model_path: str, device_map: str | None = None, dtype=torch.float32, **kwargs) -> nn.Module:
+-    model = AutoModelForCausalLM.from_pretrained(model_path, device_map=device_map, dtype=dtype, **kwargs)
+-    return model
++    config = AutoConfig.from_pretrained(model_path, trust_remote_code=kwargs.get("trust_remote_code", False))
++    # Preserve the complete Ministral wrapper; calibration remains text-only.
++    loader = AutoModelForImageTextToText if config.model_type == "mistral3" else AutoModelForCausalLM
++    return loader.from_pretrained(
++        model_path, config=config, device_map=device_map, dtype=dtype, **kwargs
++    )
+ 
+ 
+ def load_tokenizer(model_path: str, **kwargs) -> AutoTokenizer:
+diff --git a/tests/test_sphconvert.py b/tests/test_sphconvert.py
+index a3df55c..b1e363f 100644
+--- a/tests/test_sphconvert.py
++++ b/tests/test_sphconvert.py
+@@ -2,16 +2,20 @@ import sys
+ 
+ import pytest
+ import torch
+-from transformers import AutoModelForCausalLM, Qwen3Config, Qwen3ForCausalLM
++from transformers import (
++    AutoModelForCausalLM, AutoModelForImageTextToText,
++    Qwen3Config, Qwen3ForCausalLM,
++    Ministral3Config, Mistral3Config, Mistral3ForConditionalGeneration, PixtralVisionConfig,
++)
+ 
+ from paroquant.cli import convert
+ from paroquant.optim.sphlinear import SPHPseudoQuantizedLinear
+ from paroquant.optim.sagelinear import SAGEPseudoQuantizedLinear
+-from paroquant.optim.util import load_model
++from paroquant.optim.util import load_model, get_blocks
+ 
+ 
+-@pytest.fixture
+-def source_model(tmp_path):
++@pytest.fixture(params=["qwen3", "ministral3"])
++def source_model(tmp_path, request):
+     model = Qwen3ForCausalLM(
+         Qwen3Config(
+             vocab_size=64,
+@@ -23,6 +27,23 @@ def source_model(tmp_path):
+             head_dim=32,
+         )
+     ).eval()
++    if request.param == "ministral3":
++        text = Ministral3Config(
++            vocab_size=64, hidden_size=128, intermediate_size=256,
++            num_hidden_layers=1, num_attention_heads=4, num_key_value_heads=2,
++            head_dim=32,
++            rope_parameters={
++                "rope_type": "default", "rope_theta": 10000.0,
++                "original_max_position_embeddings": 32, "llama_4_scaling_beta": 0.1,
++            },
++        )
++        vision = PixtralVisionConfig(
++            hidden_size=32, intermediate_size=64, num_hidden_layers=1,
++            num_attention_heads=4, image_size=16, patch_size=4,
++        )
++        model = Mistral3ForConditionalGeneration(
++            Mistral3Config(text_config=text, vision_config=vision)
++        ).eval()
+     source = tmp_path / "source"
+     model.save_pretrained(source)
+     return source, model
+@@ -31,7 +52,7 @@ def source_model(tmp_path):
+ def test_text_loaders_preserve_source_weights(source_model):
+     source, model = source_model
+     for restored in (convert._load_model(str(source)), load_model(str(source))):
+-        assert isinstance(restored, Qwen3ForCausalLM)
++        assert type(restored) is type(model)
+         for key, value in model.state_dict().items():
+             torch.testing.assert_close(restored.state_dict()[key], value)
+ 
+@@ -44,7 +65,7 @@ def test_text_pseudo_export_roundtrip(source_model, tmp_path, monkeypatch, metho
+     result_dir.mkdir()
+     expected_weights = {}
+     for index, name in enumerate(("q_proj", "k_proj", "v_proj")):
+-        projection = getattr(model.model.layers[0].self_attn, name)
++        projection = getattr(get_blocks(model)[0].self_attn, name)
+         if method == "sage":
+             quantized = SAGEPseudoQuantizedLinear(
+                 projection,
+@@ -60,7 +81,8 @@ def test_text_pseudo_export_roundtrip(source_model, tmp_path, monkeypatch, metho
+                 projection, sample_size=256, kmeans_iterations=1, codebook_bits=6 + index, seed=0
+             )
+         torch.save(quantized.state_dict(), result_dir / f"0.self_attn.{name}.pt")
+-        expected_weights[f"model.layers.0.self_attn.{name}.weight"] = quantized.pseudo_weight()
++        prefix = "model.language_model" if model.config.model_type == "mistral3" else "model"
++        expected_weights[f"{prefix}.layers.0.self_attn.{name}.weight"] = quantized.pseudo_weight()
+     exported = tmp_path / "exported"
+     monkeypatch.setattr(
+         sys,
+@@ -79,7 +101,8 @@ def test_text_pseudo_export_roundtrip(source_model, tmp_path, monkeypatch, metho
+     )
+     convert.main()
+ 
+-    restored = AutoModelForCausalLM.from_pretrained(exported, local_files_only=True).eval()
++    loader = AutoModelForImageTextToText if model.config.model_type == "mistral3" else AutoModelForCausalLM
++    restored = loader.from_pretrained(exported, local_files_only=True).eval()
+     for key, value in restored.state_dict().items():
+         torch.testing.assert_close(value, expected_weights.get(key, model.state_dict()[key]))
+     with torch.no_grad():

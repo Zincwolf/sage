@@ -63,11 +63,7 @@ class UniSVQConfig(BlockwiseConfig):
             "upstream_revision": "449e8e4f317d2c539d7135c39f66817adce3cf4c",
             "codebook": self.codebook,
             "codebook_bit": self.codebook_bit,
-            "hadamard": (
-                "upstream-128-block-narrow-axis-full-width"
-                if model_family == "qwen3_5"
-                else "upstream-128-block"
-            ),
+            "hadamard": "upstream-128-block",
             **({"unsaved_attention_norms": "frozen"} if model_family == "qwen3_5" else {}),
             "hessian_protocol": self.hessian_recipe(layer_end),
             "reconstruction": "whole-block-teacher-inputs-fp16-autocast-summed-microbatch-means",

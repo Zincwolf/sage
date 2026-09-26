@@ -1,0 +1,24 @@
+# Complete HF Qwen3.5 wrapper; calibration is text-only.
+# in_proj_a/b, vision, MTP and other non-target tensors remain unquantized.
+model: /path/to/Qwen3.5-4B
+calibration: outputs/calibration/calibration.pt
+output_dir: outputs/sphquant/qwen3.5
+device: 0
+
+# Paper baseline: 64 directions / 4 radius bits, FP16 radius-grid QDQ.
+codebook_bits: 6
+sample_size: 65536
+kmeans_iterations: 20
+
+# Quantized student inputs, dense teacher targets; FP16 reconstruction.
+epochs: 20
+learning_rate: 0.001
+batch_size: 16
+gradient_accumulation_steps: 1
+cache_shards: 8
+resume: true
+checkpointing: true
+seed: 0
+max_layers: null
+calibration_limit: null
+use_wandb: false

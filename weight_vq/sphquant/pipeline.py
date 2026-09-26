@@ -10,6 +10,7 @@ from contextlib import contextmanager
 from pathlib import Path
 
 from weight_vq import utils
+from weight_vq.blockwise.artifacts import projections
 from weight_vq.calibration import load_calibration_metadata
 from weight_vq.sage.config import SAGEConfig
 from weight_vq.sphquant.config import SPHQuantConfig
@@ -40,13 +41,22 @@ def _physical_device(device: int) -> Generator[None, None, None]:
             os.environ["CUDA_VISIBLE_DEVICES"] = previous
 
 
-def _model_contract(model: Path) -> int:
+def _model_contract(model: Path) -> tuple[str, tuple[tuple[str, ...], ...]]:
     from transformers import AutoConfig
 
     hf_config = AutoConfig.from_pretrained(model, local_files_only=True, trust_remote_code=True)
-    if hf_config.model_type != "qwen3":
-        raise ValueError(f"SPHQuant supports only qwen3, got {hf_config.model_type!r}")
-    return int(hf_config.num_hidden_layers)
+    if hf_config.model_type == "qwen3":
+        return "qwen3", (PROJECTIONS,) * hf_config.num_hidden_layers
+    if hf_config.model_type == "mistral3" and hf_config.text_config.model_type == "ministral3":
+        return "mistral3", (PROJECTIONS,) * hf_config.text_config.num_hidden_layers
+    if hf_config.model_type == "qwen3_5":
+        return "qwen3_5", tuple(
+            tuple(name for name, *_ in projections(layer_type=layer_type))
+            for layer_type in hf_config.text_config.layer_types
+        )
+    raise ValueError(
+        f"SPHQuant/SAGE supports qwen3, Ministral-3 and Qwen3.5, got {hf_config.model_type!r}"
+    )
 
 
 def _target_layers(config: SPHQuantConfig, model_layers: int) -> range:
@@ -60,13 +70,15 @@ def checkpoint_path(config: SPHQuantConfig, layer: int, projection: str) -> Path
     return config.checkpoints / config.model.name / f"{layer}.{projection}.pt"
 
 
-def missing_checkpoints(config: SPHQuantConfig, model_layers: int | None = None) -> list[Path]:
-    if model_layers is None:
-        model_layers = _model_contract(config.model)
+def missing_checkpoints(
+    config: SPHQuantConfig, layout: tuple[tuple[str, ...], ...] | None = None
+) -> list[Path]:
+    if layout is None:
+        _, layout = _model_contract(config.model)
     return [
         checkpoint_path(config, layer, projection)
-        for layer in _target_layers(config, model_layers)
-        for projection in PROJECTIONS
+        for layer in _target_layers(config, len(layout))
+        for projection in layout[layer]
         if not checkpoint_path(config, layer, projection).is_file()
     ]
 
@@ -74,8 +86,8 @@ def missing_checkpoints(config: SPHQuantConfig, model_layers: int | None = None)
 def optimize(config: SPHQuantConfig) -> None:
     if not 1 <= config.codebook_bits <= 8:
         raise ValueError("codebook_bits must be within [1, 8]")
-    model_layers = _model_contract(config.model)
-    _target_layers(config, model_layers)
+    _, layout = _model_contract(config.model)
+    _target_layers(config, len(layout))
     metadata = load_calibration_metadata(config.calibration)
 
     # Both methods share the SPHQuant reconstruction protocol. Only SAGE adds
@@ -138,8 +150,8 @@ def optimize(config: SPHQuantConfig) -> None:
 
 
 def export(config: SPHQuantConfig) -> None:
-    model_layers = _model_contract(config.model)
-    missing = missing_checkpoints(config, model_layers)
+    _, layout = _model_contract(config.model)
+    missing = missing_checkpoints(config, layout)
     if missing:
         preview = [str(path) for path in missing[:8]]
         raise FileNotFoundError(
@@ -187,18 +199,23 @@ def run(config: SPHQuantConfig) -> None:
 
 def validate(config: SPHQuantConfig) -> None:
     """Load a dense artifact through the evaluation-facing HF API."""
-    model_layers = _model_contract(config.model)
-    target_layers = _target_layers(config, model_layers)
+    family, layout = _model_contract(config.model)
+    target_layers = _target_layers(config, len(layout))
+    prefix = "model.language_model" if family in ("mistral3", "qwen3_5") else "model"
     with _physical_device(config.device):
-        from transformers import AutoModelForCausalLM
+        from transformers import AutoModelForCausalLM, AutoModelForImageTextToText
 
         utils.validate_dense_model(
             config.exported_model,
-            model_loader=AutoModelForCausalLM,
+            model_loader=(
+                AutoModelForImageTextToText
+                if family in ("mistral3", "qwen3_5")
+                else AutoModelForCausalLM
+            ),
             weights=lambda model: (
                 (name, model.get_parameter(f"{name}.weight"))
                 for index in target_layers
-                for projection in PROJECTIONS
-                for name in (f"model.layers.{index}.{projection}",)
+                for projection in layout[index]
+                for name in (f"{prefix}.layers.{index}.{projection}",)
             ),
         )

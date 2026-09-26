@@ -54,8 +54,9 @@ def qwen35(tmp_path):
         hidden_size=128,
         intermediate_size=256,
         num_hidden_layers=2,
-        num_attention_heads=4,
-        num_key_value_heads=2,
+        # Preserve GQA while keeping K/V at 128 channels for upstream UniSVQ.
+        num_attention_heads=8,
+        num_key_value_heads=4,
         head_dim=32,
         linear_num_key_heads=16,
         linear_num_value_heads=32,
@@ -188,7 +189,7 @@ def test_native_replay_hessians_and_sample_independence(qwen35):
             assert set(statistics) == {"in", "out", "up", "down"}
             assert layer.linear_attn.in_proj_a.weight.shape == (32, 128)
         else:
-            assert layer.self_attn.q_proj.out_features == 2 * 4 * 32
+            assert layer.self_attn.q_proj.out_features == 2 * 8 * 32
         replay.loss_parts(layer, torch.arange(2), "cpu")[0].backward()
         assert not replay.targets.requires_grad
     torch.testing.assert_close(backbone.norm(state.inputs), expected)
