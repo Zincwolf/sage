@@ -54,8 +54,8 @@ cu128 = [
 wvq = "weight_vq.cli:main"
 
 [build-system]
-requires = ["hatchling>=1.27,<2"]
-build-backend = "hatchling.build"
+requires = ["scikit-build-core==0.11.6", "ninja==1.13.0"]
+build-backend = "scikit_build_core.build"
 
 [dependency-groups]
 dev = [
@@ -64,11 +64,24 @@ dev = [
     "ruff>=0.15,<0.16",
 ]
 
-[tool.hatch.version]
-path = "weight_vq/__init__.py"
+[tool.scikit-build]
+cmake.version = ">=3.28"
+cmake.build-type = "Release"
+wheel.packages = ["weight_vq"]
+build-dir = "build/{wheel_tag}"
+# Include the patched sources when building an sdist without Git submodules.
+sdist.include = [
+    "third_party/qtip/LICENSE",
+    "third_party/qtip/qtip-kernels/src/*.cpp",
+    "third_party/qtip/qtip-kernels/src/*.cu",
+    "third_party/qtip/qtip-kernels/src/*.h",
+    "third_party/unisvq/hadaquant/csrc/*.cpp",
+    "third_party/unisvq/hadaquant/csrc/*.cu",
+]
 
-[tool.hatch.build.targets.wheel]
-packages = ["weight_vq"]
+[tool.scikit-build.metadata.version]
+provider = "scikit_build_core.metadata.regex"
+input = "weight_vq/__init__.py"
 
 [tool.uv]
 preview-features = ["extra-build-dependencies"]
@@ -97,6 +110,7 @@ requires-python = ">=3.7"
 requires-dist = ["torch", "packaging", "ninja"]
 
 [tool.uv.extra-build-dependencies]
+weight-vq = [{ requirement = "torch", match-runtime = true }]
 quiptools-cuda = [
     { requirement = "torch", match-runtime = true },
     "setuptools==69.5.1",
@@ -133,6 +147,7 @@ default = true
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = ["-ra", "--strict-config", "--strict-markers"]
+markers = ["cuda: requires weight-vq's compiled CUDA inference extensions"]
 
 [tool.ruff]
 target-version = "py311"

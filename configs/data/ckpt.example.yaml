@@ -1,0 +1,6 @@
+# Synthetic packed weights for native HF inference; not a quality-evaluation model.
+# Set model/output_dir to your local model and artifact storage directories.
+model: models/Qwen3-4B-Instruct-2507
+method: sage  # sage, sphquant, qtip, quip-sharp, unisvq
+output_dir: outputs/qwen3-4b-synthetic-sage
+seed: 0
