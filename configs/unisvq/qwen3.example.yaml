@@ -2,6 +2,8 @@
 model: /path/to/Qwen3-4B-Instruct-2507
 dataset: /path/to/RedPajama/Arrows
 output_dir: /path/to/outputs/unisvq/qwen3-4b
+# Only selects HF export format; existing quantization checkpoints are reused.
+export_compressed: false
 devices: [0]
 model_dtype: bfloat16
 seed: 0

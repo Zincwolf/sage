@@ -31,7 +31,8 @@ class WVQConfig(QuantizationConfigMixin):
     """On-disk inference ABI, not a calibration or optimization recipe.
 
     Module dimensions come from the native architecture. Only SAGE's variable
-    bit split/permutation and QuIP#'s trained FP32 scales need per-module metadata.
+    bit split/permutation and the trained QuIP#/UniSVQ scale dtypes need
+    per-module metadata.
     Fixed codebooks, packing and transform conventions are defined by format_version.
     """
 
@@ -126,10 +127,13 @@ class WVQQuantizer(HfQuantizer):
                         "SV": torch.empty(n, dtype=scale_dtype),
                     }
                 elif method == "unisvq":
+                    scale_dtype = (
+                        torch.float16 if spec.get("fp16_scales", False) else torch.bfloat16
+                    )
                     packed = {
                         "Qidxs": torch.empty(n, k // 4, dtype=torch.uint8),
-                        "SU": torch.empty(k, dtype=torch.bfloat16),
-                        "SV": torch.empty(n, dtype=torch.bfloat16),
+                        "SU": torch.empty(k, dtype=scale_dtype),
+                        "SV": torch.empty(n, dtype=scale_dtype),
                         "cb_scale": torch.empty((), dtype=torch.bfloat16),
                         "cb_zero": torch.empty((), dtype=torch.bfloat16),
                     }

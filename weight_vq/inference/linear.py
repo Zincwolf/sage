@@ -180,6 +180,8 @@ class UniSVQLinear(nn.Module):
     M<=8 reads packed weights; M>8 uses a temporary or retained BF16 raw matrix.
     Prepare host scalars (and, if enabled, the cache) before compilation/capture.
     The timed boundary casts preserve the external model/attention/KV dtype.
+    Trained checkpoints retain FP16 SU/SV on disk; the frozen HadaQuant kernels
+    consume BF16 scales. That execution-time rounding is not QDQ equivalence.
     """
 
     Qidxs: torch.Tensor
@@ -225,7 +227,7 @@ class UniSVQLinear(nn.Module):
         self.prepare_for_inference()
         assert self._cb_s is not None and self._cb_z is not None
         scaled = x.to(torch.bfloat16).reshape(-1, self.in_features).contiguous()
-        scaled = unisvq_su_had(scaled, self.SU)
+        scaled = unisvq_su_had(scaled, self.SU.to(torch.bfloat16))
         if scaled.shape[0] <= 8:
             output = unisvq(scaled, self.Qidxs, self._cb_s, self._cb_z)
         else:
@@ -236,7 +238,7 @@ class UniSVQLinear(nn.Module):
             else:
                 weight = unisvq_decompress(self.Qidxs, self._cb_s, self._cb_z)
             output = scaled @ weight.T
-        output = unisvq_had_sv(output.contiguous(), self.SV)
+        output = unisvq_had_sv(output.contiguous(), self.SV.to(torch.bfloat16))
         output = output.reshape(*x.shape[:-1], self.out_features).to(x.dtype)
         return output if self.bias is None else output + self.bias
 

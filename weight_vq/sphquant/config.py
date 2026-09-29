@@ -32,6 +32,9 @@ class SPHQuantConfig:
         max_layers: Number of leading decoder layers to quantize; null selects all.
         calibration_limit: Cap calibration sequences for smoke tests; null uses all.
         use_wandb: Log reconstruction metrics to Weights & Biases.
+        export_compressed: Export a packed Qwen3 HF model instead of dense QDQ.
+            SPHQuant requires 64/4; SAGE supports all three adaptive bit splits.
+            This only selects the export format and does not change optimization.
     """
 
     model: Path
@@ -52,6 +55,7 @@ class SPHQuantConfig:
     max_layers: int | None = None
     calibration_limit: int | None = None
     use_wandb: bool = False
+    export_compressed: bool = False
 
     @property
     def checkpoints(self) -> Path:

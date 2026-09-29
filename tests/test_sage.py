@@ -26,6 +26,7 @@ def test_sage_component_ablation_options(monkeypatch, tmp_path, esg, adaptive_bi
             str(path),
             f"--esg={str(esg).lower()}",
             f"--adaptive_bits={str(adaptive_bits).lower()}",
+            "--export_compressed=true",
         ]
     )
     assert received == [
@@ -37,6 +38,7 @@ def test_sage_component_ablation_options(monkeypatch, tmp_path, esg, adaptive_bi
             adaptive_bits=adaptive_bits,
             energy_power=0.625,
             allow_partial=True,
+            export_compressed=True,
         )
     ]
 

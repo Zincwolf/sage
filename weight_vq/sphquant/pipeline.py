@@ -1,4 +1,4 @@
-"""Shared ParoQuant stage adapters for SPHQuant and SAGE dense QDQ export."""
+"""Shared ParoQuant stages for SPHQuant/SAGE reconstruction and HF export."""
 
 from __future__ import annotations
 
@@ -8,6 +8,7 @@ import sys
 from collections.abc import Generator
 from contextlib import contextmanager
 from pathlib import Path
+from typing import cast
 
 from weight_vq import utils
 from weight_vq.blockwise.artifacts import projections
@@ -158,7 +159,9 @@ def optimize(config: SPHQuantConfig) -> None:
 
 
 def export(config: SPHQuantConfig) -> None:
-    _, layout = _model_contract(config.model)
+    family, layout = _model_contract(config.model)
+    if config.export_compressed and family != "qwen3":
+        raise ValueError("compressed spherical export currently supports Qwen3 dense decoders only")
     missing = missing_checkpoints(config, layout)
     if missing:
         preview = [str(path) for path in missing[:8]]
@@ -173,6 +176,57 @@ def export(config: SPHQuantConfig) -> None:
     if staging.exists():
         raise FileExistsError(staging)
     config.exported_model.parent.mkdir(parents=True, exist_ok=True)
+    if config.export_compressed:
+        import torch
+        from transformers import AutoModelForCausalLM, AutoTokenizer
+
+        from weight_vq.integrations.transformers import WVQConfig, packed_linear
+        from weight_vq.sphquant.packing import pack_spherical
+
+        sage = isinstance(config, SAGEConfig)
+        quantization = WVQConfig(method="sage" if sage else "sphquant")
+        model = AutoModelForCausalLM.from_pretrained(
+            config.model, dtype="auto", device_map="cpu", local_files_only=True
+        ).eval()
+        try:
+            with torch.no_grad():
+                for index in _target_layers(config, len(layout)):
+                    for projection in layout[index]:
+                        name = f"model.layers.{index}.{projection}"
+                        linear = cast(torch.nn.Linear, model.get_submodule(name))
+                        state = torch.load(
+                            checkpoint_path(config, index, projection),
+                            map_location="cpu",
+                            weights_only=True,
+                        )
+                        packed = pack_spherical(state, sage=sage)
+                        bias = linear.bias
+                        if bias is not None:
+                            bias.copy_(state["bias"])
+                        model.set_submodule(
+                            name,
+                            packed_linear(quantization.method, packed, linear.out_features, bias),
+                        )
+                        quantization.modules[name] = (
+                            {
+                                "codebook_bits": packed["codebook"].shape[1].bit_length() - 1,
+                                "permuted": bool(packed["permutation"].numel()),
+                            }
+                            if sage
+                            else {}
+                        )
+                        del linear, state, packed
+            model.config.quantization_config = quantization
+            model.config._name_or_path = ""
+            model.save_pretrained(staging, safe_serialization=True, max_shard_size="5GB")
+            AutoTokenizer.from_pretrained(config.model, local_files_only=True).save_pretrained(
+                staging
+            )
+            os.replace(staging, config.exported_model)
+        finally:
+            if staging.exists():
+                shutil.rmtree(staging)
+        return
     arguments = [
         "--model",
         str(config.model),
@@ -199,14 +253,46 @@ def export(config: SPHQuantConfig) -> None:
 
 
 def run(config: SPHQuantConfig) -> None:
-    """Produce and validate a dense QDQ model with one shared configuration."""
+    """Produce and validate a QDQ or packed model with one shared configuration."""
     optimize(config)
     export(config)
     validate(config)
 
 
 def validate(config: SPHQuantConfig) -> None:
-    """Load a dense artifact through the evaluation-facing HF API."""
+    """Load the exported HF artifact and report representation statistics."""
+    if config.export_compressed:
+        from transformers import AutoModelForCausalLM, AutoTokenizer
+
+        from weight_vq.inference.linear import SAGELinear, SPHQuantLinear
+        from weight_vq.integrations.transformers import WVQConfig
+
+        model = AutoModelForCausalLM.from_pretrained(
+            config.exported_model, dtype="auto", device_map="cpu", local_files_only=True
+        )
+        quantization = model.config.quantization_config
+        method = "sage" if isinstance(config, SAGEConfig) else "sphquant"
+        if not isinstance(quantization, WVQConfig) or quantization.method != method:
+            raise ValueError(f"expected a compressed {method} HF artifact")
+        AutoTokenizer.from_pretrained(config.exported_model, local_files_only=True)
+        print(
+            "layer,packed_bytes,bits_per_weight,codebook_bits,grid_min,grid_step_max,codebook_max"
+        )
+        for name, spec in quantization.modules.items():
+            linear = cast(SAGELinear | SPHQuantLinear, model.get_submodule(name))
+            tensors = linear.state_dict()
+            size = sum(value.numel() * value.element_size() for value in tensors.values())
+            # Inspect the stored grid/codebook without materializing dense weights.
+            if method == "sage":
+                minimum, step = tensors["radius_grid"].unbind(-1)
+            else:
+                minimum, step = tensors["radius_mins"], tensors["radius_scales"]
+            print(
+                f"{name},{size},{8 * size / (linear.in_features * linear.out_features):.6f},"
+                f"{spec.get('codebook_bits', 6)},{minimum.min().item():.6g},"
+                f"{step.max().item():.6g},{tensors['codebook'].max().item():.6g}"
+            )
+        return
     family, layout = _model_contract(config.model)
     target_layers = _target_layers(config, len(layout))
     prefix = "model.language_model" if family in ("mistral3", "qwen3_5") else "model"

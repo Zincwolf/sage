@@ -9,7 +9,7 @@ from weight_vq.sphquant.config import SPHQuantConfig
 
 @dataclass(frozen=True)
 class SAGEConfig(SPHQuantConfig):
-    """SAGE: run optimizes with ESG/ABS, exports dense QDQ, and validates the result.
+    """SAGE: run optimizes with ESG/ABS, exports QDQ or packed HF, and validates.
 
     Args:
         esg: Enable energy-stratified grouping and weighted spherical fitting.

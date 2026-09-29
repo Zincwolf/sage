@@ -106,19 +106,27 @@ def test_released_defaults_and_hessian_precision(tiny_unisvq):
     "stage", ["calibration", "hessian", "quantize", "export", "validate", "run"]
 )
 @pytest.mark.parametrize("hessian_dtype", ["float32", "float64"])
-def test_cli(tiny_unisvq, monkeypatch, stage, hessian_dtype):
+@pytest.mark.parametrize("export_compressed", [False, True])
+def test_cli(tiny_unisvq, monkeypatch, stage, hessian_dtype, export_compressed):
     config, _ = tiny_unisvq
     path = config.output_dir.parent / "unisvq.yaml"
     path.write_text(
         "model: /model\ndataset: /rp\noutput_dir: /run\ndevices: [0]\n"
-        f"hessian_dtype: {hessian_dtype}\n"
+        f"hessian_dtype: {hessian_dtype}\nexport_compressed: {str(export_compressed).lower()}\n"
     )
     received = []
     assert cli.STAGES[("unisvq", stage)][1] is UniSVQConfig
     monkeypatch.setitem(cli.STAGES, ("unisvq", stage), (received.append, UniSVQConfig))
     cli.main(["unisvq", stage, "--config", str(path)])
     assert received == [
-        UniSVQConfig(Path("/model"), Path("/rp"), Path("/run"), [0], hessian_dtype=hessian_dtype)
+        UniSVQConfig(
+            Path("/model"),
+            Path("/rp"),
+            Path("/run"),
+            [0],
+            hessian_dtype=hessian_dtype,
+            export_compressed=export_compressed,
+        )
     ]
 
 

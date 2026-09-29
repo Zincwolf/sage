@@ -1,6 +1,7 @@
 import csv
 import os
 import sys
+from dataclasses import replace
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
 from typing import Any
@@ -78,8 +79,12 @@ def test_model_contract_accepts_qwen3_and_ministral(monkeypatch: pytest.MonkeyPa
 
 
 @pytest.mark.parametrize("config_type", [SPHQuantConfig, SAGEConfig])
+@pytest.mark.parametrize("export_compressed", [False, True])
 def test_optimize_preserves_qwen3_text_recipe(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, config_type: type[SPHQuantConfig]
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    config_type: type[SPHQuantConfig],
+    export_compressed: bool,
 ) -> None:
     parsed: list[tuple[dict[str, object], str | None]] = []
     reference_parse = object()
@@ -103,7 +108,7 @@ def test_optimize_preserves_qwen3_text_recipe(
     )
     monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "8")
 
-    optimize(smoke_config(tmp_path, config_type))
+    optimize(replace(smoke_config(tmp_path, config_type), export_compressed=export_compressed))
 
     arguments, device = parsed[0]
     assert arguments["method"] == ("sage" if config_type is SAGEConfig else "sphquant")
@@ -120,6 +125,7 @@ def test_optimize_preserves_qwen3_text_recipe(
     assert arguments["calibration_path"] == "outputs/calibration.pt"
     assert "multimodal_calibration_path" not in arguments
     assert "model_dtype" not in arguments
+    assert "export_compressed" not in arguments
     assert arguments["train_size"] == 1920
     assert arguments["validation_size"] == 128
     assert arguments["seqlen"] == 2048
@@ -149,6 +155,18 @@ def test_export_rejects_incomplete_checkpoints(
     )
     with pytest.raises(FileNotFoundError, match="missing 7 SPHQuant checkpoints"):
         export(smoke_config(tmp_path))
+
+
+@pytest.mark.parametrize("config_type", [SPHQuantConfig, SAGEConfig])
+@pytest.mark.parametrize("family", ["mistral3", "qwen3_5", "qwen3_moe"])
+def test_packed_export_rejects_unsupported_family(monkeypatch, tmp_path, config_type, family):
+    monkeypatch.setattr(
+        "weight_vq.sphquant.pipeline._model_contract", lambda _model: (family, (PROJECTIONS,))
+    )
+    config = replace(smoke_config(tmp_path, config_type), export_compressed=True)
+    with pytest.raises(ValueError, match="Qwen3 dense decoders only"):
+        export(config)
+    assert not config.exported_model.exists()
 
 
 def test_export_runs_shared_converter_in_staging_directory(

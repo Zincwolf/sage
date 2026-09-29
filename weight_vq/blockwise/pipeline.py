@@ -1,4 +1,4 @@
-"""Shared language-model calibration through HF dense QDQ export."""
+"""Shared language-model calibration through HF QDQ or packed export."""
 
 from __future__ import annotations
 
@@ -48,7 +48,7 @@ from weight_vq.blockwise.models import (
 )
 from weight_vq.blockwise.reconstruction import DistributedReconstruction
 from weight_vq.blockwise.replay import capture_replay
-from weight_vq.inference.linear import QuIPSharpLinear
+from weight_vq.inference.linear import QuIPSharpLinear, UniSVQLinear
 from weight_vq.integrations.transformers import WVQConfig, packed_linear
 from weight_vq.qtip.artifacts import reconstruct_dense_weight
 from weight_vq.qtip.config import QTIPConfig
@@ -491,9 +491,12 @@ def quantize(config: Config) -> None:
 
 def export(config: Config) -> None:
     family, model_layers = _model_contract(config.model)
-    compressed = isinstance(config, QuIPSharpConfig) and config.export_compressed
+    compressed = isinstance(config, (QuIPSharpConfig, UniSVQConfig)) and config.export_compressed
+    packed_method = "unisvq" if isinstance(config, UniSVQConfig) else "quip-sharp"
     if compressed and family != "qwen3":
-        raise ValueError("compressed QuIP# export currently supports Qwen3 dense decoders only")
+        raise ValueError(
+            f"compressed {packed_method} export currently supports Qwen3 dense decoders only"
+        )
     hf_config = AutoConfig.from_pretrained(config.model, local_files_only=True)
     start, end = layer_range(config, model_layers)
     method = {QTIPConfig: "qtip", QuIPSharpConfig: "quip_sharp", UniSVQConfig: "unisvq"}[
@@ -525,7 +528,18 @@ def export(config: Config) -> None:
         .eval()
     )
     # Reuse the registered HF inference ABI; no synthetic payloads or dense caches.
-    quantization = WVQConfig(method="quip-sharp") if compressed else None
+    quantization = WVQConfig(method=packed_method) if compressed else None
+    unisvq_affine: dict[str, torch.Tensor] = {}
+    if compressed and isinstance(config, UniSVQConfig):
+        # Method-environment boundary: use the released fixed grid, not a fitted
+        # affine approximation. Its Cartesian uint8 order is already the CUDA ABI.
+        from unisvq import codebook
+
+        unisvq_codebook = codebook.get_codebook(config.codebook, codebook_bit=config.codebook_bit)
+        unisvq_affine = {
+            "cb_scale": unisvq_codebook.linear_proj_weight[0, 0],
+            "cb_zero": unisvq_codebook.linear_proj_bias[0],
+        }
     layers = language_backbone(model).layers
     with torch.no_grad():
         for index in range(start, end):
@@ -540,21 +554,29 @@ def export(config: Config) -> None:
                 )
                 if quantization is not None:
                     linear = layer.get_submodule(attribute)
-                    # Native E8P checkpoints already have the kernel's tiled indices.
-                    # SV already includes the quantization scale. Preserve trained
-                    # FP32 SU/SV rather than rounding them to the synthetic ABI's FP16.
-                    packed = {
-                        "Qidxs": saved["Qidxs"].contiguous(),
-                        "SU": saved["SU"].float().contiguous(),
-                        "SV": saved["SV"].float().contiguous(),
-                    }
+                    # Both native layouts already match their inference ABI; SV
+                    # already includes the quantization scale. Preserve the trained
+                    # scale storage (FP16 UniSVQ / FP32 QuIP#), not synthetic dtypes.
+                    if isinstance(config, UniSVQConfig):
+                        packed = {
+                            "Qidxs": saved["Qidxs"].contiguous(),
+                            "SU": saved["SU"].half().contiguous(),
+                            "SV": saved["SV"].half().contiguous(),
+                            **{key: value.clone() for key, value in unisvq_affine.items()},
+                        }
+                        spec: dict[str, int | bool] = {"fp16_scales": True}
+                    else:
+                        packed = {
+                            "Qidxs": saved["Qidxs"].contiguous(),
+                            "SU": saved["SU"].float().contiguous(),
+                            "SV": saved["SV"].float().contiguous(),
+                        }
+                        spec = {"fp32_scales": True}
                     layer.set_submodule(
                         attribute,
-                        packed_linear("quip-sharp", packed, linear.out_features, linear.bias),
+                        packed_linear(packed_method, packed, linear.out_features, linear.bias),
                     )
-                    quantization.modules[f"model.layers.{index}.{attribute}"] = {
-                        "fp32_scales": True
-                    }
+                    quantization.modules[f"model.layers.{index}.{attribute}"] = spec
                     del linear, packed, saved
                     continue
                 target = projection_weight(layer, attribute)
@@ -619,19 +641,20 @@ def export(config: Config) -> None:
 
 
 def validate(config: Config) -> None:
-    if isinstance(config, QuIPSharpConfig) and config.export_compressed:
+    if isinstance(config, (QuIPSharpConfig, UniSVQConfig)) and config.export_compressed:
         # Standard HF loading checks the serialized state. Report actual packed
         # storage including trained scales; do not materialize dense weights.
         model = AutoModelForCausalLM.from_pretrained(
             config.exported_model, dtype="auto", device_map="cpu", local_files_only=True
         )
         quantization = model.config.quantization_config
-        if not isinstance(quantization, WVQConfig) or quantization.method != "quip-sharp":
-            raise ValueError("expected a compressed QuIP# HF artifact")
+        method = "unisvq" if isinstance(config, UniSVQConfig) else "quip-sharp"
+        if not isinstance(quantization, WVQConfig) or quantization.method != method:
+            raise ValueError(f"expected a compressed {method} HF artifact")
         AutoTokenizer.from_pretrained(config.exported_model, local_files_only=True)
         print("layer,packed_bytes,bits_per_weight,su_abs_max,sv_abs_max")
         for name in quantization.modules:
-            linear = cast(QuIPSharpLinear, model.get_submodule(name))
+            linear = cast(QuIPSharpLinear | UniSVQLinear, model.get_submodule(name))
             size = sum(
                 value.numel() * value.element_size() for value in linear.state_dict().values()
             )

@@ -13,6 +13,8 @@ class UniSVQConfig(BlockwiseConfig):
     """UniSVQ W2 PTQ from a cached Arrow dataset, with layerwise reconstruction.
 
     Args:
+        export_compressed: Export packed Qwen3 HF weights for the CUDA inference
+            runtime instead of dense QDQ. Does not change quantization or resume.
         hessian_dtype: Precision for activation-statistics accumulation and storage.
         min_expert_coverage: Minimum fraction of original calibration tokens needed
             to use an expert's measured covariance. Insufficient coverage uses an identity metric.
@@ -20,6 +22,7 @@ class UniSVQConfig(BlockwiseConfig):
         early_stop: Reconstruction validation patience in epochs.
     """
 
+    export_compressed: bool = False
     hessian_samples: int = 1024
     hessian_sequence_length: int = 4096
     # Statistics accumulation/storage only; upstream quantizer precision is unchanged.
@@ -61,6 +64,8 @@ class UniSVQConfig(BlockwiseConfig):
 
     def recipe(self, *, model_family: str, layer_end: int) -> dict[str, object]:
         shared = super().recipe(model_family=model_family, layer_end=layer_end)
+        # Serialization policy must not invalidate existing quantization artifacts.
+        shared.pop("export_compressed")
         if model_family == "qwen3_moe":
             shared["moe_protocol"] = {
                 **cast(dict[str, object], shared["moe_protocol"]),
