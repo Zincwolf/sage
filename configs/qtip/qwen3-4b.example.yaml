@@ -3,6 +3,11 @@ model: /path/to/Qwen3-4B-Instruct-2507
 dataset: /path/to/RedPajama/Arrows
 output_dir: /path/to/outputs/qtip/qwen3-4b-rp-blockwise
 
+# False/false preserves the paper's QDQ path. True/false and true/true share
+# new kernel-layout checkpoints. False/true is invalid; export never requantizes.
+packed_inference_kernel: false
+export_compressed: false
+
 devices: [0, 1, 2, 3]
 seed: 0
 layer_start: 0

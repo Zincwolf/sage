@@ -57,8 +57,9 @@ def test_cli_options_after_config_override_same_named_fields(
     ]
 
 
+@pytest.mark.parametrize("kernel_layout,compressed", [(False, False), (True, False), (True, True)])
 def test_cli_loads_and_forwards_qtip_config(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, kernel_layout: bool, compressed: bool
 ) -> None:
     config = tmp_path / "qtip.yaml"
     config.write_text(
@@ -72,6 +73,8 @@ def test_cli_loads_and_forwards_qtip_config(
         "reconstruction_epochs: 1\n"
         "layer_start: 0\n"
         "layer_end: 4\n"
+        f"packed_inference_kernel: {str(kernel_layout).lower()}\n"
+        f"export_compressed: {str(compressed).lower()}\n"
     )
     received: list[QTIPConfig] = []
     monkeypatch.setitem(cli.STAGES, ("qtip", "export"), (received.append, QTIPConfig))
@@ -90,6 +93,8 @@ def test_cli_loads_and_forwards_qtip_config(
             reconstruction_epochs=1,
             layer_start=0,
             layer_end=4,
+            packed_inference_kernel=kernel_layout,
+            export_compressed=compressed,
         )
     ]
 

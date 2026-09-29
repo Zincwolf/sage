@@ -31,7 +31,7 @@ class WVQConfig(QuantizationConfigMixin):
     """On-disk inference ABI, not a calibration or optimization recipe.
 
     Module dimensions come from the native architecture. Only SAGE's variable
-    bit split/permutation and the trained QuIP#/UniSVQ scale dtypes need
+    bit split/permutation and the trained QTIP/QuIP#/UniSVQ parameter dtypes need
     per-module metadata.
     Fixed codebooks, packing and transform conventions are defined by format_version.
     """
@@ -113,11 +113,14 @@ class WVQQuantizer(HfQuantizer):
                         "codebook": torch.empty(64, 8, dtype=torch.float16),
                     }
                 elif method == "qtip":
+                    parameter_dtype = (
+                        torch.float32 if spec.get("fp32_parameters", False) else torch.float16
+                    )
                     packed = {
                         "trellis": torch.empty(n * k // 256, 32, dtype=torch.int16),
-                        "SU": torch.empty(k, dtype=torch.float16),
+                        "SU": torch.empty(k, dtype=parameter_dtype),
                         "SV": torch.empty(n, dtype=torch.float32),
-                        "tlut": torch.empty(512, 2, dtype=torch.float16),
+                        "tlut": torch.empty(512, 2, dtype=parameter_dtype),
                     }
                 elif method == "quip-sharp":
                     scale_dtype = torch.float32 if spec.get("fp32_scales", False) else torch.float16

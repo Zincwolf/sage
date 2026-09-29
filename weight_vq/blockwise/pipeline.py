@@ -48,8 +48,8 @@ from weight_vq.blockwise.models import (
 )
 from weight_vq.blockwise.reconstruction import DistributedReconstruction
 from weight_vq.blockwise.replay import capture_replay
-from weight_vq.inference.linear import QuIPSharpLinear, UniSVQLinear
-from weight_vq.integrations.transformers import WVQConfig, packed_linear
+from weight_vq.inference.linear import QTIPLinear, QuIPSharpLinear, UniSVQLinear
+from weight_vq.integrations.transformers import Method, WVQConfig, packed_linear
 from weight_vq.qtip.artifacts import reconstruct_dense_weight
 from weight_vq.qtip.config import QTIPConfig
 from weight_vq.quip_sharp.config import QuIPSharpConfig
@@ -103,6 +103,9 @@ def _initialize_run(config: Config, family: str, end: int) -> None:
         saved_recipe = json.loads(recipe_path.read_text())
         # Older recipes included this execution-only memory/compute tradeoff.
         saved_recipe.pop("gradient_checkpointing", None)
+        if isinstance(config, QTIPConfig) and saved_recipe.get("schema_version") == 4:
+            # This historical recipe always forced the non-kernel layout.
+            saved_recipe.setdefault("packed_inference_kernel", False)
         if saved_recipe != recipe:
             raise RuntimeError("configuration differs from checkpoints; use a new output_dir")
     else:
@@ -491,8 +494,13 @@ def quantize(config: Config) -> None:
 
 def export(config: Config) -> None:
     family, model_layers = _model_contract(config.model)
-    compressed = isinstance(config, (QuIPSharpConfig, UniSVQConfig)) and config.export_compressed
-    packed_method = "unisvq" if isinstance(config, UniSVQConfig) else "quip-sharp"
+    compressed = config.export_compressed
+    packed_methods: dict[type, Method] = {
+        QTIPConfig: "qtip",
+        QuIPSharpConfig: "quip-sharp",
+        UniSVQConfig: "unisvq",
+    }
+    packed_method = packed_methods[type(config)]
     if compressed and family != "qwen3":
         raise ValueError(
             f"compressed {packed_method} export currently supports Qwen3 dense decoders only"
@@ -506,6 +514,8 @@ def export(config: Config) -> None:
     recipe = json.loads((config.checkpoints / recipe_name).read_text())
     # Accept legacy recipes without rewriting the original checkpoint provenance.
     recipe.pop("gradient_checkpointing", None)
+    if isinstance(config, QTIPConfig) and recipe.get("schema_version") == 4:
+        recipe.setdefault("packed_inference_kernel", False)
     if recipe != config.recipe(model_family=family, layer_end=end):
         raise RuntimeError("export configuration differs from checkpoint recipe")
     missing = [
@@ -554,9 +564,9 @@ def export(config: Config) -> None:
                 )
                 if quantization is not None:
                     linear = layer.get_submodule(attribute)
-                    # Both native layouts already match their inference ABI; SV
-                    # already includes the quantization scale. Preserve the trained
-                    # scale storage (FP16 UniSVQ / FP32 QuIP#), not synthetic dtypes.
+                    # Native layouts already match the inference ABI. Preserve
+                    # trained scale/LUT precision, not synthetic dtypes. QTIP
+                    # stores Wscale separately; fold it into SV exactly as in QDQ.
                     if isinstance(config, UniSVQConfig):
                         packed = {
                             "Qidxs": saved["Qidxs"].contiguous(),
@@ -565,6 +575,16 @@ def export(config: Config) -> None:
                             **{key: value.clone() for key, value in unisvq_affine.items()},
                         }
                         spec: dict[str, int | bool] = {"fp16_scales": True}
+                    elif isinstance(config, QTIPConfig):
+                        if int(saved.get("rcp", 0)) != 0:
+                            raise NotImplementedError("packed QTIP export does not use TP packing")
+                        packed = {
+                            "trellis": saved["trellis"].contiguous(),
+                            "SU": saved["SU"].float().contiguous(),
+                            "SV": (saved["SV"].float() * saved["Wscale"].float()).contiguous(),
+                            "tlut": saved["tlut"].float().contiguous(),
+                        }
+                        spec = {"fp32_parameters": True}
                     else:
                         packed = {
                             "Qidxs": saved["Qidxs"].contiguous(),
@@ -641,20 +661,22 @@ def export(config: Config) -> None:
 
 
 def validate(config: Config) -> None:
-    if isinstance(config, (QuIPSharpConfig, UniSVQConfig)) and config.export_compressed:
+    if config.export_compressed:
         # Standard HF loading checks the serialized state. Report actual packed
         # storage including trained scales; do not materialize dense weights.
         model = AutoModelForCausalLM.from_pretrained(
             config.exported_model, dtype="auto", device_map="cpu", local_files_only=True
         )
         quantization = model.config.quantization_config
-        method = "unisvq" if isinstance(config, UniSVQConfig) else "quip-sharp"
+        method = {QTIPConfig: "qtip", QuIPSharpConfig: "quip-sharp", UniSVQConfig: "unisvq"}[
+            type(config)
+        ]
         if not isinstance(quantization, WVQConfig) or quantization.method != method:
             raise ValueError(f"expected a compressed {method} HF artifact")
         AutoTokenizer.from_pretrained(config.exported_model, local_files_only=True)
         print("layer,packed_bytes,bits_per_weight,su_abs_max,sv_abs_max")
         for name in quantization.modules:
-            linear = cast(QuIPSharpLinear | UniSVQLinear, model.get_submodule(name))
+            linear = cast(QTIPLinear | QuIPSharpLinear | UniSVQLinear, model.get_submodule(name))
             size = sum(
                 value.numel() * value.element_size() for value in linear.state_dict().values()
             )

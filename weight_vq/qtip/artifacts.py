@@ -25,12 +25,29 @@ def reconstruct_dense_weight(saved: dict[str, Any], config: dict[str, Any]) -> t
         decode_mode=quant["decode_mode"],
         tlut=saved.get("tlut"),
     )
-    trellis = codebook.unpack_trellis(saved["trellis"], quant["td_x"] * quant["td_y"])
+    packed = saved["trellis"]
+    kernel_layout = quant.get("packed_inference_kernel", False)
+    if kernel_layout:
+        # Undo only the storage swizzle; these are already MMA-order trellis
+        # states produced at quantization time, not converted legacy states.
+        packed = (
+            packed.view(torch.uint8)
+            .reshape(out_features // 32, in_features // 32, 32, 2, 2, quant["K"])
+            .permute(0, 4, 1, 3, 2, 5)
+            .flip((-1,))
+            .reshape(-1, 2)
+            .flip((-1,))
+            .contiguous()
+            .view(torch.int16)
+            .reshape(-1, 16 * quant["K"])
+        )
+    trellis = codebook.unpack_trellis(packed, quant["td_x"] * quant["td_y"])
+    tiles = codebook.recons(trellis).transpose(0, 1).transpose(1, 2)
+    if kernel_layout:
+        order = torch.arange(256).reshape(2, 8, 2, 4, 2).permute(1, 3, 2, 0, 4).flatten()
+        tiles = tiles.reshape(-1, 256)[:, torch.argsort(order)]
     raw = (
-        codebook.recons(trellis)
-        .transpose(0, 1)
-        .transpose(1, 2)
-        .reshape(
+        tiles.reshape(
             out_features // quant["td_x"],
             in_features // quant["td_y"],
             quant["td_x"],

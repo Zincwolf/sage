@@ -1,0 +1,105 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Zincwolf <zincwolf@outlook.com>
+Date: Tue, 29 Sep 2026 14:11:54 +0800
+Subject: [PATCH] feat: connect explicit packed layouts to wvq kernels
+
+---
+ lib/algo/finetune.py     |  8 +++++---
+ lib/codebook/__init__.py | 25 ++++++++++++++++++++-----
+ tests/test_dense_only.py |  6 +++---
+ 3 files changed, 28 insertions(+), 11 deletions(-)
+
+diff --git a/lib/algo/finetune.py b/lib/algo/finetune.py
+index 8b128fd..7e4dde5 100644
+--- a/lib/algo/finetune.py
++++ b/lib/algo/finetune.py
+@@ -139,6 +139,11 @@ def quantize_finetune_decoder_layer(mixed_layer, quant_order, idx, cb, args,
+                                     hessian_loader=None,
+                                     reconstruction_groups=None,
+                                     projection_owners=None):
++    has_kernel = (args.packed_inference_kernel
++                  and utils.has_kernel(args.decode_mode, args.L, args.K, args.V,
++                                       args.tlut_bits, args.td_x, args.td_y))
++    if args.packed_inference_kernel and not has_kernel:
++        raise ValueError("packed_inference_kernel requested, but QTIP kernel support is unavailable")
+     torch.manual_seed(getattr(args, 'seed', 0) + idx)
+     torch.set_num_threads(args.num_cpu_threads)
+     torch.set_grad_enabled(False)
+@@ -161,9 +166,6 @@ def quantize_finetune_decoder_layer(mixed_layer, quant_order, idx, cb, args,
+     else:
+         train_dl = valid_dl = None
+ 
+-    has_kernel = (args.packed_inference_kernel
+-                  and utils.has_kernel(args.decode_mode, args.L, args.K, args.V,
+-                                       args.tlut_bits, args.td_x, args.td_y))
+     completed = 0 if resume_state is None else resume_state['completed']
+     projection_payloads = (
+         {} if resume_state is None else dict(resume_state['projections']))
+diff --git a/lib/codebook/__init__.py b/lib/codebook/__init__.py
+index 68f587d..2360d4a 100644
+--- a/lib/codebook/__init__.py
++++ b/lib/codebook/__init__.py
+@@ -1,16 +1,31 @@
+ import torch
+ 
+ try:
+-    import qtip_kernels
++    # wvq builds the same patched upstream sources under a private name.
++    import weight_vq.inference._qtip as qtip_kernels
+ except ModuleNotFoundError as error:
+-    if error.name != "qtip_kernels":
++    if error.name not in (
++            "weight_vq", "weight_vq.inference", "weight_vq.inference._qtip"):
+         raise
+-    # Packed CUDA inference is optional for LDLQ and dense-QDQ export.
+-    qtip_kernels = None
++    # Keep standalone QTIP and the paper's kernel-free QDQ path usable.
++    try:
++        import qtip_kernels
++    except ModuleNotFoundError as standalone_error:
++        if standalone_error.name != "qtip_kernels":
++            raise
++        qtip_kernels = None
+ 
+ HAS_QTIP_KERNELS = qtip_kernels is not None
+ 
+ kernels = [
++    (256, 1, 256, 2),
++    (256, 1, 256, 3),
++    (256, 1, 256, 4),
++    (1024, 1, 2560, 2),
++    (4096, 1, 2560, 2),
++    (9728, 1, 2560, 2),
++    (2560, 1, 4096, 2),
++    (2560, 1, 9728, 2),
+     (1024, 1, 3072, 4),
+     (8192, 1, 3072, 4),
+     (3072, 1, 8192, 4),
+@@ -97,6 +112,6 @@ def {name}_cuda(
+         x: torch.Tensor,
+         codebook: torch.Tensor) -> torch.Tensor:
+     out = torch.zeros(({m}, 1), dtype=torch.float32, device=x.device)
+-    {kernel_name}(out, compressed.reshape(-1).view(torch.int32), x.to(torch.float16).T, codebook.reshape(-1))
++    {kernel_name}(out, compressed.reshape(-1).view(torch.int32), x.to(torch.float16).T, codebook.to(torch.float16).reshape(-1))
+     return out.T
+     """)
+diff --git a/tests/test_dense_only.py b/tests/test_dense_only.py
+index 79c1818..c36e5f7 100644
+--- a/tests/test_dense_only.py
++++ b/tests/test_dense_only.py
+@@ -5,12 +5,12 @@ import scipy.cluster.vq
+ import torch
+ 
+ 
+-def test_codebook_imports_without_packed_cuda_kernels():
+-    from lib.codebook import HAS_QTIP_KERNELS
++def test_codebook_quantizes_without_packed_kernel_support(monkeypatch):
++    from lib import codebook as codebook_module
+     from lib.codebook.bitshift import bitshift_codebook
+     from lib.utils.kernel_check import has_kernel
+ 
+-    assert not HAS_QTIP_KERNELS
++    monkeypatch.setattr(codebook_module, "HAS_QTIP_KERNELS", False)
+     assert not has_kernel("quantlut_sym", 16, 2, 2, 9, 16, 16)
+ 
+     tlut = torch.randn(1 << 3, 2)

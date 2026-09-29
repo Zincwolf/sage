@@ -28,6 +28,8 @@ class QTIPLinear(nn.Module):
 
     Retention is a deployment policy, not upstream default eval. Without it,
     every GEMM call decodes a temporary weight. Single-row decode stays packed.
+    Real checkpoints preserve FP32 SU/TLUT; the inference kernels consume an
+    FP16 LUT. This execution-time rounding is not dense-QDQ equivalence.
     """
 
     trellis: torch.Tensor
@@ -74,20 +76,24 @@ class QTIPLinear(nn.Module):
 
     def warm_weight_cache(self) -> None:
         if self.cached_dense_weight and self.dense is None:
-            self.dense = decode_dense(self.trellis, self.tlut, self.out_features, self.in_features)
+            self.dense = decode_dense(
+                self.trellis, self.tlut.half(), self.out_features, self.in_features
+            )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         scaled = hadamard_transform(x.float() * self.SU, self.had_left, transpose=True) / 32
         scaled = scaled.to(torch.float16).reshape(-1, self.in_features)
         if scaled.shape[0] == 1:
-            output = qtip(scaled, self.trellis, self.tlut, self.out_features).float()
+            output = qtip(scaled, self.trellis, self.tlut.half(), self.out_features).float()
         else:
             if self.cached_dense_weight:
                 self.warm_weight_cache()
                 weight = self.dense
                 assert weight is not None
             else:
-                weight = decode_dense(self.trellis, self.tlut, self.out_features, self.in_features)
+                weight = decode_dense(
+                    self.trellis, self.tlut.half(), self.out_features, self.in_features
+                )
             output = (scaled @ weight.T).float()
         output = hadamard_transform(output, self.had_right, transpose=False) * (self.SV * 32)
         output = output.reshape(*x.shape[:-1], self.out_features).to(x.dtype)
