@@ -12,10 +12,13 @@ class QuIPSharpConfig(BlockwiseConfig):
     """QuIP# W2 E8P blockwise quantization from a cached Arrow dataset.
 
     Args:
+        export_compressed: Export packed Qwen3 HF weights for the CUDA inference
+            runtime instead of dense QDQ. Does not change quantization or resume.
         min_expert_coverage: Minimum fraction of original calibration tokens needed
             to use an expert's measured covariance. Insufficient coverage uses an identity metric.
     """
 
+    export_compressed: bool = False
     hessian_samples: int = 6144
     hessian_sequence_length: int = 2048
     sigma_reg: float = 0.01
@@ -42,11 +45,14 @@ class QuIPSharpConfig(BlockwiseConfig):
         }
 
     def recipe(self, *, model_family: str, layer_end: int) -> dict[str, object]:
+        shared = super().recipe(model_family=model_family, layer_end=layer_end)
+        # Serialization choice must not invalidate trained checkpoints or resume.
+        shared.pop("export_compressed")
         return {
             "schema_version": 1,
             "format": "quip-sharp-blockwise-full-state-dense-qdq",
             "codebook": self.codebook,
             "hessian_protocol": self.hessian_recipe(layer_end),
             "hadamard": "upstream-with-512-block-fallback",
-            **super().recipe(model_family=model_family, layer_end=layer_end),
+            **shared,
         }

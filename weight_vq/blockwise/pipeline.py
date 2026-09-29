@@ -48,6 +48,8 @@ from weight_vq.blockwise.models import (
 )
 from weight_vq.blockwise.reconstruction import DistributedReconstruction
 from weight_vq.blockwise.replay import capture_replay
+from weight_vq.inference.linear import QuIPSharpLinear
+from weight_vq.integrations.transformers import WVQConfig, packed_linear
 from weight_vq.qtip.artifacts import reconstruct_dense_weight
 from weight_vq.qtip.config import QTIPConfig
 from weight_vq.quip_sharp.config import QuIPSharpConfig
@@ -489,6 +491,9 @@ def quantize(config: Config) -> None:
 
 def export(config: Config) -> None:
     family, model_layers = _model_contract(config.model)
+    compressed = isinstance(config, QuIPSharpConfig) and config.export_compressed
+    if compressed and family != "qwen3":
+        raise ValueError("compressed QuIP# export currently supports Qwen3 dense decoders only")
     hf_config = AutoConfig.from_pretrained(config.model, local_files_only=True)
     start, end = layer_range(config, model_layers)
     method = {QTIPConfig: "qtip", QuIPSharpConfig: "quip_sharp", UniSVQConfig: "unisvq"}[
@@ -519,6 +524,8 @@ def export(config: Config) -> None:
         .from_pretrained(config.model, dtype="auto", device_map="cpu", local_files_only=True)
         .eval()
     )
+    # Reuse the registered HF inference ABI; no synthetic payloads or dense caches.
+    quantization = WVQConfig(method="quip-sharp") if compressed else None
     layers = language_backbone(model).layers
     with torch.no_grad():
         for index in range(start, end):
@@ -531,6 +538,25 @@ def export(config: Config) -> None:
                     map_location="cpu",
                     weights_only=True,
                 )
+                if quantization is not None:
+                    linear = layer.get_submodule(attribute)
+                    # Native E8P checkpoints already have the kernel's tiled indices.
+                    # SV already includes the quantization scale. Preserve trained
+                    # FP32 SU/SV rather than rounding them to the synthetic ABI's FP16.
+                    packed = {
+                        "Qidxs": saved["Qidxs"].contiguous(),
+                        "SU": saved["SU"].float().contiguous(),
+                        "SV": saved["SV"].float().contiguous(),
+                    }
+                    layer.set_submodule(
+                        attribute,
+                        packed_linear("quip-sharp", packed, linear.out_features, linear.bias),
+                    )
+                    quantization.modules[f"model.layers.{index}.{attribute}"] = {
+                        "fp32_scales": True
+                    }
+                    del linear, packed, saved
+                    continue
                 target = projection_weight(layer, attribute)
                 if isinstance(config, QTIPConfig):
                     weight = reconstruct_dense_weight(saved, recipe)
@@ -550,6 +576,9 @@ def export(config: Config) -> None:
             state = layer.state_dict()
             for name, value in auxiliary.items():
                 state[name].copy_(value)
+    if quantization is not None:
+        model.config.quantization_config = quantization
+        model.config._name_or_path = ""
     with tempfile.TemporaryDirectory(prefix=".export-", dir=config.output_dir) as temporary:
         staging = Path(temporary) / "model"
         state_dict = model.state_dict()
@@ -590,6 +619,27 @@ def export(config: Config) -> None:
 
 
 def validate(config: Config) -> None:
+    if isinstance(config, QuIPSharpConfig) and config.export_compressed:
+        # Standard HF loading checks the serialized state. Report actual packed
+        # storage including trained scales; do not materialize dense weights.
+        model = AutoModelForCausalLM.from_pretrained(
+            config.exported_model, dtype="auto", device_map="cpu", local_files_only=True
+        )
+        quantization = model.config.quantization_config
+        if not isinstance(quantization, WVQConfig) or quantization.method != "quip-sharp":
+            raise ValueError("expected a compressed QuIP# HF artifact")
+        AutoTokenizer.from_pretrained(config.exported_model, local_files_only=True)
+        print("layer,packed_bytes,bits_per_weight,su_abs_max,sv_abs_max")
+        for name in quantization.modules:
+            linear = cast(QuIPSharpLinear, model.get_submodule(name))
+            size = sum(
+                value.numel() * value.element_size() for value in linear.state_dict().values()
+            )
+            print(
+                f"{name},{size},{8 * size / (linear.in_features * linear.out_features):.6f},"
+                f"{linear.SU.abs().max().item():.6g},{linear.SV.abs().max().item():.6g}"
+            )
+        return
     family, model_layers = _model_contract(config.model)
     start, end = layer_range(config, model_layers)
     prefix = "model.language_model" if family in ("mistral3", "qwen3_5") else "model"

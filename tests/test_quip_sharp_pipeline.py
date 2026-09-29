@@ -12,6 +12,7 @@ from transformers import (
     PreTrainedTokenizerFast,
     Qwen3Config,
     Qwen3ForCausalLM,
+    StaticCache,
 )
 
 from weight_vq.blockwise.artifacts import PROJECTIONS
@@ -175,3 +176,56 @@ def test_fp32_hessian_restart_and_hf_export(tiny_quip, devices):
         )
     assert torch.isfinite(dense(payload["validation"]).logits).all()
     assert cast(Any, dense).generate(payload["validation"][:1], max_new_tokens=2).shape == (1, 18)
+
+    # Reuse genuinely optimized checkpoints, not the random packed exporter.
+    # The same checkpoint supports both export formats without retraining.
+    from tests.inference.reference import decode_e8p, qtip_hadamard_reference
+    from weight_vq.blockwise.pipeline import validate
+
+    multiple.exported_model.rename(multiple.output_dir / "dense_qdq")
+    packed_config = replace(multiple, export_compressed=True)
+    export(packed_config)
+    validate(packed_config)
+    # HF's annotation omits the output_loading_info tuple return.
+    packed, info = AutoModelForCausalLM.from_pretrained(  # pyright: ignore[reportGeneralTypeIssues]
+        packed_config.exported_model,
+        dtype="auto",
+        device_map="cuda:0",
+        local_files_only=True,
+        output_loading_info=True,
+        attn_implementation="sdpa",
+    )
+    assert not any(info.values())
+    auxiliary = torch.load(multiple.checkpoints / "0.auxiliary.pt", weights_only=True)
+    for name, value in auxiliary.items():
+        torch.testing.assert_close(packed.model.layers[0].state_dict()[name].cpu(), value)
+    for attribute, short, *_ in PROJECTIONS:
+        saved = torch.load(multiple.checkpoints / f"0_{short}.pt", weights_only=True)
+        linear = packed.model.layers[0].get_submodule(attribute)
+        for key in ("Qidxs", "SU", "SV"):
+            torch.testing.assert_close(getattr(linear, key).cpu(), saved[key], rtol=0, atol=0)
+        assert linear.SU.dtype == linear.SV.dtype == torch.float32
+        raw = decode_e8p({"Qidxs": linear.Qidxs.cpu()})
+        decoded = qtip_hadamard_reference(qtip_hadamard_reference(raw / 32).T).T
+        decoded = decoded * linear.SU.cpu() * (linear.SV.cpu() * 32).unsqueeze(1)
+        expected = reconstruct_dense_weight(saved, torch.device("cuda:0"))
+        torch.testing.assert_close(decoded, expected, rtol=1e-5, atol=1e-6)
+    with torch.inference_mode():
+        cache = StaticCache(config=packed.config, max_cache_len=18)
+        tokens = payload["validation"][:1].cuda()
+        for step in range(3):
+            inputs = tokens if step == 0 else tokens[:, -1:]
+            logits = packed(inputs, past_key_values=cache, use_cache=True).logits
+            assert torch.isfinite(logits).all()
+            assert cache.get_seq_length() == 16 + step
+        generated = cast(Any, packed).generate(
+            tokens,
+            max_new_tokens=2,
+            do_sample=False,
+            eos_token_id=None,
+            pad_token_id=0,
+            disable_compile=True,
+        )
+        assert generated.shape == (1, 18)
+        assert torch.equal(generated[:, :16], tokens)
+    assert not any(name.endswith(".dense") for name in packed.state_dict())

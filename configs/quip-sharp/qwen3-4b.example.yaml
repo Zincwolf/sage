@@ -2,6 +2,9 @@
 model: /path/to/Qwen3-4B-Instruct-2507
 dataset: /path/to/RedPajama/Arrows
 output_dir: /path/to/outputs/quip-sharp/qwen3-4b-rp-blockwise
+# true: packed HF artifact for wvq inference; false: standard dense QDQ.
+# Export choice only: the same trained checkpoints support both formats.
+export_compressed: false
 devices: [0, 1]
 model_dtype: bfloat16
 seed: 0
@@ -14,9 +17,9 @@ validation_samples: 128
 sequence_length: 2048
 
 # Memory/throughput controls; they do not change global batch size.
-hessian_chunk_size: 256
-forward_microbatch_size: 1
-reconstruction_microbatch_size: 1
+hessian_chunk_size: 2048
+forward_microbatch_size: 16
+reconstruction_microbatch_size: 4
 replay_device: cuda
 num_cpu_threads: 8
 
