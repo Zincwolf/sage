@@ -102,7 +102,7 @@ index 2441a71..720daf2 100644
  def power_derivative(w, delta, k, power_clamp_max):
 diff --git a/pyproject.toml b/pyproject.toml
 new file mode 100644
-index 0000000..61573e7
+index 0000000..ec3bd7b
 --- /dev/null
 +++ b/pyproject.toml
 @@ -0,0 +1,17 @@
@@ -115,8 +115,8 @@ index 0000000..61573e7
 +version = "0.0.0"
 +description = "UniSVQ upstream PTQ components under an isolated package name"
 +requires-python = ">=3.11"
-+# Runtime dependencies are selected by the parent project's cu124/cu128 extras,
-+# as for the other method packages. Do not select a second CUDA/Torch stack here.
++# Runtime dependencies are provided by the parent project, as for the other
++# method packages. Do not select a second CUDA/Torch stack here.
 +
 +[tool.setuptools.packages.find]
 +include = ["unisvq*"]

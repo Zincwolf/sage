@@ -87,9 +87,13 @@ def _check_wrapper_pipeline(
     # Load an independent FP16 teacher through HF, as in ParoQuant. Casting the
     # in-memory BF16 fixture would retain rounded non-persistent RoPE buffers,
     # whereas from_pretrained regenerates them from configuration.
-    model = AutoModelForImageTextToText.from_pretrained(
-        config.model, dtype=torch.float16, local_files_only=True
-    ).half().eval()
+    model = (
+        AutoModelForImageTextToText.from_pretrained(
+            config.model, dtype=torch.float16, local_files_only=True
+        )
+        .half()
+        .eval()
+    )
     teacher_outputs, teacher_inputs, energies = {}, {}, {}
 
     def capture_layer(index, _module, inputs, output):
