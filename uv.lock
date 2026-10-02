@@ -154,8 +154,8 @@ name = "anyio"
 version = "4.15.1"
 source = { registry = "https://pypi.tuna.tsinghua.edu.cn/simple" }
 dependencies = [
-    { name = "idna", marker = "extra == 'extra-9-weight-vq-cu128'" },
-    { name = "typing-extensions", marker = "extra == 'extra-9-weight-vq-cu128'" },
+    { name = "idna" },
+    { name = "typing-extensions" },
 ]
 sdist = { url = "https://pypi.tuna.tsinghua.edu.cn/packages/a9/d2/f4d173e22df740bc37b1db102b386ba719b66e95b0f0d751f556b387e6d2/anyio-4.15.1.tar.gz", hash = "sha256:9f28306018cbd6d329e64a36d58256edff76dd996fe423bc957326e578b82a94", size = 276966, upload-time = "2026-09-05T10:42:39.44Z" }
 wheels = [
@@ -506,8 +506,8 @@ name = "httpcore"
 version = "1.0.9"
 source = { registry = "https://pypi.tuna.tsinghua.edu.cn/simple" }
 dependencies = [
-    { name = "certifi", marker = "extra == 'extra-9-weight-vq-cu128'" },
-    { name = "h11", marker = "extra == 'extra-9-weight-vq-cu128'" },
+    { name = "certifi" },
+    { name = "h11" },
 ]
 sdist = { url = "https://pypi.tuna.tsinghua.edu.cn/packages/06/94/82699a10bca87a5556c9c59b5963f2d039dbd239f25bc2a63907a05a14cb/httpcore-1.0.9.tar.gz", hash = "sha256:6e34463af53fd2ab5d807f399a9b45ea31c3dfa2276f15a2c3f00afff6e176e8", size = 85484, upload-time = "2025-04-24T22:06:22.219Z" }
 wheels = [
@@ -519,10 +519,10 @@ name = "httpx"
 version = "0.28.1"
 source = { registry = "https://pypi.tuna.tsinghua.edu.cn/simple" }
 dependencies = [
-    { name = "anyio", marker = "extra == 'extra-9-weight-vq-cu128'" },
-    { name = "certifi", marker = "extra == 'extra-9-weight-vq-cu128'" },
-    { name = "httpcore", marker = "extra == 'extra-9-weight-vq-cu128'" },
-    { name = "idna", marker = "extra == 'extra-9-weight-vq-cu128'" },
+    { name = "anyio" },
+    { name = "certifi" },
+    { name = "httpcore" },
+    { name = "idna" },
 ]
 sdist = { url = "https://pypi.tuna.tsinghua.edu.cn/packages/b1/df/48c586a5fe32a0f01324ee087459e112ebb7224f646c0b5023f5e79e9956/httpx-0.28.1.tar.gz", hash = "sha256:75e98c5f16b0f35b567856f597f06ff2270a374470a5c2392242528e3e3e42fc", size = 141406, upload-time = "2024-12-06T15:37:23.222Z" }
 wheels = [
@@ -1266,9 +1266,9 @@ version = "3.0.5"
 source = { registry = "https://pypi.tuna.tsinghua.edu.cn/simple" }
 dependencies = [
     { name = "numpy", version = "2.1.2", source = { registry = "https://pypi.tuna.tsinghua.edu.cn/simple" }, marker = "extra == 'extra-9-weight-vq-cu124'" },
-    { name = "numpy", version = "2.2.6", source = { registry = "https://pypi.tuna.tsinghua.edu.cn/simple" }, marker = "extra == 'extra-9-weight-vq-cu128'" },
+    { name = "numpy", version = "2.2.6", source = { registry = "https://pypi.tuna.tsinghua.edu.cn/simple" }, marker = "extra == 'extra-9-weight-vq-cu128' or extra != 'extra-9-weight-vq-cu124'" },
     { name = "python-dateutil" },
-    { name = "tzdata", marker = "sys_platform == 'emscripten' or sys_platform == 'win32'" },
+    { name = "tzdata", marker = "sys_platform == 'emscripten' or sys_platform == 'win32' or (extra == 'extra-9-weight-vq-cu124' and extra == 'extra-9-weight-vq-cu128')" },
 ]
 sdist = { url = "https://pypi.tuna.tsinghua.edu.cn/packages/be/4f/5f3422a2afec5ffc46308b79e53291365a93748b498ac2e58bead0197916/pandas-3.0.5.tar.gz", hash = "sha256:dca3734d6ab7c906e6730f0788b0a1dbb9f2467731f9711f77995c8e9d62d712", size = 4658219, upload-time = "2026-07-22T22:19:28.819Z" }
 wheels = [
@@ -2157,10 +2157,13 @@ version = "0.1.0"
 source = { editable = "." }
 dependencies = [
     { name = "glog" },
+    { name = "httpx" },
     { name = "jsonargparse", extra = ["signatures"] },
+    { name = "pandas" },
     { name = "paroquant" },
     { name = "pillow" },
     { name = "primefac" },
+    { name = "pyarrow" },
     { name = "qtip" },
     { name = "quip-sharp" },
     { name = "rich" },
@@ -2216,14 +2219,17 @@ requires-dist = [
     { name = "fast-hadamard-transform", marker = "extra == 'cu128'", directory = "third_party/fast-hadamard-transform" },
     { name = "glog", specifier = "==0.3.1" },
     { name = "gptqmodel", marker = "extra == 'cu128'", specifier = "==7.3.6" },
+    { name = "httpx", specifier = ">=0.28,<1" },
     { name = "huggingface-hub", marker = "extra == 'cu124'", specifier = ">=0.30,<1" },
     { name = "huggingface-hub", marker = "extra == 'cu128'", specifier = ">=1,<2" },
     { name = "jsonargparse", extras = ["signatures"], specifier = "==4.50.0" },
     { name = "numpy", marker = "extra == 'cu124'", specifier = "==2.1.2" },
     { name = "numpy", marker = "extra == 'cu128'", specifier = "==2.2.6" },
+    { name = "pandas", specifier = ">=2,<4" },
     { name = "paroquant", editable = "third_party/paroquant" },
     { name = "pillow", specifier = "==12.3.0" },
     { name = "primefac", specifier = "==2.0.12" },
+    { name = "pyarrow", specifier = ">=15" },
     { name = "qtip", editable = "third_party/qtip" },
     { name = "quip-sharp", editable = "third_party/quip-sharp" },
     { name = "quiptools-cuda", marker = "extra == 'cu124'", directory = "third_party/quip-sharp/quiptools" },

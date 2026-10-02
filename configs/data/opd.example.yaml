@@ -1,0 +1,18 @@
+# External vLLM server must serve this local dense model and support return_token_ids.
+model: /path/to/Qwen3-4B-Instruct-2507
+dataset: /path/to/opd-data/text
+base_url: http://127.0.0.1:8123/v1
+output_dir: /path/to/outputs/opd/qwen3-4b
+
+train_samples: 1920
+validation_samples: 128
+sequence_length: 2048
+train_prompts: 16000
+validation_prompts: 1200
+max_new_tokens: 1024
+max_model_len: 4096
+seed: 0
+# Maximum in-flight requests; each completed request frees a slot for another prompt.
+# Repeating the command resumes committed responses; a completed output is protected.
+batch_size: 8
+request_timeout: 600.0
