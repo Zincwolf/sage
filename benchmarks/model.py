@@ -31,11 +31,12 @@ from rich.console import Console
 from rich.table import Table
 from torch._functorch import config as aot_config
 from tqdm import tqdm
-from transformers import AutoModelForCausalLM, StaticCache
+from transformers import AutoConfig, AutoModelForCausalLM, StaticCache
 
 from benchmarks.attention import profile_attention
 from benchmarks.config import BenchmarkConfig
 from weight_vq.inference.attention import SDPA_PRIORITY, preferred_sdpa
+from weight_vq.integrations.awq import LLMAWQConfig
 from weight_vq.integrations.transformers import WVQConfig, prepare_for_inference
 
 
@@ -212,8 +213,15 @@ def benchmark(
         torch.cuda.reset_peak_memory_stats(config.device)
         model = cache = None
         try:
+            hf_config = AutoConfig.from_pretrained(model_dir, local_files_only=True)
+            saved_quantization = getattr(hf_config, "quantization_config", {})
+            if saved_quantization.get("quant_method") == "awq":
+                # Select our registered runtime without modifying the standard AWQ
+                # checkpoint or invoking GPTQModel's non-fullgraph inference path.
+                hf_config.quantization_config = LLMAWQConfig(**saved_quantization).to_dict()
             model = AutoModelForCausalLM.from_pretrained(
                 model_dir,
+                config=hf_config,
                 local_files_only=True,
                 dtype=torch.float16,
                 device_map=config.device,
@@ -243,7 +251,13 @@ def benchmark(
                 fullgraph=True, dynamic=False, mode="reduce-overhead"
             )
             method_result: dict[str, Any] = {
-                "method": quantization.method if isinstance(quantization, WVQConfig) else "dense",
+                "method": (
+                    quantization.method
+                    if isinstance(quantization, WVQConfig)
+                    else "awq"
+                    if isinstance(quantization, LLMAWQConfig)
+                    else "dense"
+                ),
                 "synthetic_seed": (
                     quantization.synthetic_seed if isinstance(quantization, WVQConfig) else None
                 ),
@@ -255,6 +269,13 @@ def benchmark(
                 "samples": {phase: [] for phase in config.phases},
                 "attention_backends": {},
             }
+            if isinstance(quantization, LLMAWQConfig):
+                method_result["quantization"] = {
+                    "bits": quantization.bits,
+                    "group_size": quantization.group_size,
+                    "format": quantization.format,
+                    "backend": "wvq::awq",
+                }
             for phase in config.phases:
                 # First two passes prepare compilation and CUDA Graphs, before requested warmup.
                 for sample in tqdm(

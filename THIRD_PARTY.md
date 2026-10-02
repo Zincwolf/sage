@@ -12,6 +12,12 @@ submodule gitlinks at the upstream revisions.
 | UniSVQ | <https://github.com/AI9Stars/UniSVQ> | `449e8e4f317d2c539d7135c39f66817adce3cf4c` | Unspecified upstream | UniSVQ PTQ; includes QuIP-derived code |
 | ParoQuant | <https://github.com/z-lab/paroquant> | `f74a96c306f7db3938e758d7dbc945d450f9f23f` | MIT | SPHQuant and SAGE optimization and dense conversion |
 
+The frozen `csrc/awq/` runtime is llm-awq `quantization_new`
+(<https://github.com/mit-han-lab/llm-awq>, `d6e797a`, MIT), migrated unchanged from
+sage-kernels `a5764f15d1adb189f4f1b717dd81585104643908`, including its current-stream
+launch adaptation and checked binding. GPTQModel supplies quantization and standard
+HF `LLM_AWQ` packing; it is not used by this inference runtime.
+
 Third-party components retain their upstream licenses and copyright notices.
 UniSVQ is referenced as a submodule; its pinned snapshot contains no LICENSE file.
 The project's GPL-3.0-only declaration applies to project-owned code. Model

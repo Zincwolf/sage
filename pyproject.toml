@@ -139,6 +139,6 @@ quote-style = "double"
 [tool.basedpyright]
 typeCheckingMode = "standard"
 pythonVersion = "3.11"
-include = ["weight_vq", "benchmarks", "tests"]
+include = ["weight_vq", "benchmarks", "scripts", "tests"]
 exclude = ["third_party"]
 extraPaths = ["third_party/qtip", "third_party/paroquant", "third_party/quip-sharp", "third_party/unisvq"]

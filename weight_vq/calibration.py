@@ -1,4 +1,9 @@
-"""Build the fixed Qwen3 mixed-text calibration recipe."""
+"""Build mixed-text calibration with the target model's tokenizer.
+
+Leave HF_HUB_OFFLINE and HF_DATASETS_OFFLINE unset when running this command.
+Hub metadata resolution is needed to locate the existing C4 cache correctly;
+the offline fallback can miss it even when the dataset files are already local.
+"""
 
 from __future__ import annotations
 

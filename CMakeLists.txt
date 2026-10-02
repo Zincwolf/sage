@@ -29,7 +29,18 @@ Python_add_library(_unisvq MODULE WITH_SOABI
   third_party/unisvq/hadaquant/csrc/v1_cuda.cpp
   third_party/unisvq/hadaquant/csrc/v1_cuda_kernel.cu)
 
-foreach(target IN ITEMS _C _qtip _unisvq)
+# Frozen llm-awq quantization_new baseline, migrated from sage-kernels.
+Python_add_library(_awq MODULE WITH_SOABI
+  csrc/awq/bindings.cpp csrc/awq/gemv/gemv_cuda.cu csrc/awq/gemm/gemm_cuda.cu)
+target_compile_definitions(_awq PRIVATE ENABLE_BF16)
+target_compile_options(_awq PRIVATE
+  -O3
+  "$<$<COMPILE_LANGUAGE:CUDA>:-U__CUDA_NO_HALF_OPERATORS__;-U__CUDA_NO_HALF_CONVERSIONS__>"
+  "$<$<COMPILE_LANGUAGE:CUDA>:-U__CUDA_NO_BFLOAT16_OPERATORS__;-U__CUDA_NO_BFLOAT16_CONVERSIONS__>"
+  "$<$<COMPILE_LANGUAGE:CUDA>:-U__CUDA_NO_BFLOAT162_OPERATORS__;-U__CUDA_NO_BFLOAT162_CONVERSIONS__>"
+  "$<$<COMPILE_LANGUAGE:CUDA>:--expt-relaxed-constexpr;--expt-extended-lambda;--use_fast_math;--threads=8>")
+
+foreach(target IN ITEMS _C _qtip _unisvq _awq)
   target_link_libraries(${target} PRIVATE ${TORCH_LIBRARIES} "${TORCH_PYTHON_LIBRARY}" CUDA::cudart)
   target_compile_features(${target} PRIVATE cxx_std_17 cuda_std_17)
   target_compile_definitions(${target} PRIVATE TORCH_EXTENSION_NAME=${target})
