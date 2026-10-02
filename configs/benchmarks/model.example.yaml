@@ -1,0 +1,33 @@
+# As in sage-kernels, disable AOT graph reuse across SDPA policy changes.
+# This does not delete caches or disable the measured CUDA Graph replay.
+# export TORCHINDUCTOR_AUTOGRAD_CACHE=0
+# uv run --no-sync wvq benchmark model --config configs/benchmarks/model.example.yaml
+# Labels are for reporting only; packed method/provenance come from HF metadata.
+# Use the same source architecture/token vocabulary across the comparison.
+models:
+  dense: /path/to/Qwen3-4B-Instruct-2507
+  sage: /path/to/sage/exported_model
+  # sphquant: /path/to/sphquant/exported_model
+  # quip-sharp: /path/to/quip-sharp/exported_model
+  # unisvq: /path/to/unisvq/exported_model
+  # qtip: /path/to/qtip/exported_model
+output_dir: outputs/benchmarks
+name: qwen3-4b
+phases: [end_to_end]
+# false: per-GEMM dequantization is timed. true: retain packed+dense, both counted
+# in model_bytes; peak memory includes temporary weights/workspace/graph pools.
+cached_dense_weight: false
+seed: 0
+device: cuda:0
+batch_size: 1
+prefill: 128
+# Includes the first token produced by prefill: 31 decode forwards for 32 tokens.
+decode: 32
+warmup: 5
+samples: 10
+# Fixed protocol: FP16 activations/KV, native SDPA/StaticCache, cuDNN-first with
+# native fallback, compile(fullgraph=True, dynamic=False, mode=reduce-overhead).
+# TTFT is GPU first-token readiness; TPOT starts at CPU first-token observation.
+# Backend profiling is outside timing; no warning for normal fallback/unknown.
+# checkpoint_directory_bytes includes all HF directory files (also tokenizer/config).
+# Synthetic packed checkpoints measure functionality/performance, not quality.

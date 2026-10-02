@@ -2153,6 +2153,7 @@ wheels = [
 
 [[package]]
 name = "weight-vq"
+version = "0.1.0"
 source = { editable = "." }
 dependencies = [
     { name = "glog" },
@@ -2162,6 +2163,7 @@ dependencies = [
     { name = "primefac" },
     { name = "qtip" },
     { name = "quip-sharp" },
+    { name = "rich" },
     { name = "safetensors" },
     { name = "scipy" },
     { name = "setuptools" },
@@ -2226,6 +2228,7 @@ requires-dist = [
     { name = "quip-sharp", editable = "third_party/quip-sharp" },
     { name = "quiptools-cuda", marker = "extra == 'cu124'", directory = "third_party/quip-sharp/quiptools" },
     { name = "quiptools-cuda", marker = "extra == 'cu128'", directory = "third_party/quip-sharp/quiptools" },
+    { name = "rich", specifier = "==15.0.0" },
     { name = "safetensors", specifier = ">=0.4.3,<1" },
     { name = "scipy", specifier = "==1.14.1" },
     { name = "setuptools", specifier = "==69.5.1" },

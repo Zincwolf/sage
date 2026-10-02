@@ -9,6 +9,8 @@ from typing import Any
 
 from jsonargparse import ArgumentParser, Namespace
 
+from benchmarks import model as model_benchmark
+from benchmarks.config import BenchmarkConfig
 from weight_vq import calibration, checkpoint
 from weight_vq.blockwise import pipeline as blockwise_pipeline
 from weight_vq.config import CalibrationConfig
@@ -40,6 +42,7 @@ STAGES.update(
 )
 STAGES[("data", "calibration")] = (calibration.main, CalibrationConfig)
 STAGES[("data", "ckpt")] = (checkpoint.main, checkpoint.CheckpointConfig)
+STAGES[("benchmark", "model")] = (model_benchmark.main, BenchmarkConfig)
 
 
 def parser() -> ArgumentParser:

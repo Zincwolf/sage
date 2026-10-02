@@ -1,6 +1,6 @@
 [project]
 name = "weight-vq"
-dynamic = ["version"]
+version = "0.1.0"
 description = "Reproducible weight vector quantization pipelines"
 license = "GPL-3.0-only"
 license-files = ["LICENSE"]
@@ -13,6 +13,7 @@ dependencies = [
     "primefac==2.0.12",
     "qtip",
     "quip-sharp",
+    "rich==15.0.0",
     "unisvq",
     "safetensors>=0.4.3,<1",
     "scipy==1.14.1",
@@ -67,7 +68,7 @@ dev = [
 [tool.scikit-build]
 cmake.version = ">=3.28"
 cmake.build-type = "Release"
-wheel.packages = ["weight_vq"]
+wheel.packages = ["weight_vq", "benchmarks"]
 build-dir = "build/{wheel_tag}"
 # Include the patched sources when building an sdist without Git submodules.
 sdist.include = [
@@ -78,10 +79,6 @@ sdist.include = [
     "third_party/unisvq/hadaquant/csrc/*.cpp",
     "third_party/unisvq/hadaquant/csrc/*.cu",
 ]
-
-[tool.scikit-build.metadata.version]
-provider = "scikit_build_core.metadata.regex"
-input = "weight_vq/__init__.py"
 
 [tool.uv]
 preview-features = ["extra-build-dependencies"]
@@ -168,6 +165,6 @@ quote-style = "double"
 [tool.basedpyright]
 typeCheckingMode = "standard"
 pythonVersion = "3.11"
-include = ["weight_vq", "tests"]
+include = ["weight_vq", "benchmarks", "tests"]
 exclude = ["third_party"]
 extraPaths = ["third_party/qtip", "third_party/paroquant", "third_party/quip-sharp", "third_party/unisvq"]
