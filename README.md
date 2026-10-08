@@ -1,63 +1,98 @@
-# WVQ
+# SAGE: Pushing 2-Bit Vector-Quantized LLMs Toward Real-World Usability
 
-For paper *SAGE: PUSHING 2-BIT VECTOR-QUANTIZED LLMS TOWARD REAL-WORLD USABILITY*.
+[Xianglong Yan](https://xianglongyan.github.io/)<sup>*</sup>, Zenan Wu<sup>*</sup>, Kewei Zhang, Kaicheng Yang, and [Yulun Zhang](http://yulunzhang.com/)<sup>†</sup><br>
+Shanghai Jiao Tong University<br>
+<sup>*</sup>Equal contribution. <sup>†</sup>Corresponding author.
 
-Weight vector quantization for Hugging Face models with QTIP, QuIP#, UniSVQ,
-SPHQuant, and SAGE. Outputs are standard HF models with quantized-and-dequantized
-floating-point weights (dense QDQ). Evaluation is handled separately.
+**Paper:** arXiv link coming soon · **Code:** this repository
 
-## Setup
+SAGE is a weight-only vector quantization method designed to preserve the practical capabilities of large language models at an extremely low bit budget. This repository contains its quantization pipeline and CUDA inference kernels, alongside implementations of the comparison methods used in the paper.
 
-Requires Linux, an NVIDIA GPU, the CUDA 12.8 toolkit, Python 3.11, and
-[uv](https://docs.astral.sh/uv/).
+## Overview
 
-Initialize the submodules and apply their patches following
-[THIRD_PARTY.md](THIRD_PARTY.md#initial-checkout), then create the environment:
+SAGE combines **Energy-Stratified Grouping (ESG)**, which groups channels from different activation-energy tiers and prioritizes sensitive channels during fitting, with **Adaptive Bit Split (ABS)**, which chooses the direction-codebook and radius bit allocation separately for each weight matrix. Its encoding payload is **2.25 bits per weight**, excluding shared metadata. On Qwen3-30B-A3B-Instruct-2507, SAGE retains **95.3%** of the BF16 model's average score; its CUDA kernel delivers up to **2.55×** non-streaming end-to-end speedup over FP16 on the measured Qwen3-4B workload.
 
-`CUDA_HOME=/usr/local/cuda-12.8 uv sync --locked`
+![SAGE method overview: spherical vector quantization, ESG, ABS, and block-wise optimization](figures/sage-overview.png)
 
-The initial sync downloads dependencies and builds CUDA extensions.
+## Results
 
-## Usage
+SAGE is evaluated on five models and six generative benchmarks covering knowledge, mathematics, code generation, instruction following, and tool use. The figure below summarizes accuracy and batch-one inference efficiency for **Qwen3-4B-Instruct-2507**. The plots on the left use independent zero-based axes; the speed measurements on the right use an RTX 4090 with on-demand weight reconstruction.
 
-[Example configurations](configs/) cover the supported methods and models.
-Prepare a local HF model and a calibration artifact; the
-[calibration template](configs/data/calibration.example.yaml) and
-`uv run wvq data calibration --help` describe calibration setup for
-SPHQuant and SAGE. Our OPD datasets are provided as a [training set](https://huggingface.co/datasets/chizhongw/opd-data/blob/main/text/train_clean_balanced.parquet) and an optional [validation set](https://huggingface.co/datasets/chizhongw/opd-data/blob/main/text/heldout_clean.parquet).
+![Qwen3-4B accuracy across six benchmarks and inference efficiency on an RTX 4090](figures/accuracy-and-efficiency.png)
 
-Copy a method template and set its model, calibration, and output paths:
+<details>
+<summary><strong>Full accuracy results across five models</strong></summary>
+
+![Full paper results: BF16 and vector-quantization methods across five models and six benchmarks](figures/main-results.png)
+
+</details>
+
+### Inference efficiency
+
+The following measurements use **Qwen3-4B-Instruct-2507**, batch-one non-streaming generation, an **RTX 4090**, FP16 activations and KV cache, and packed weights reconstructed on demand. SAGE reaches **2.31–2.55×** end-to-end speedup over dense FP16 across the two shown input/output lengths. Packed model sizes include unquantized parameters.
+
+![First-token latency, output throughput, end-to-end speedup, and packed model size](figures/inference-efficiency.png)
+
+## Installation
+
+The quantization and CUDA build require **Linux**, an **NVIDIA GPU**, **CUDA 12.8**, **Python 3.11**, and [uv](https://docs.astral.sh/uv/). Clone the repository, initialize the pinned submodules, apply their patches, and install the locked environment:
+
+```bash
+git clone https://github.com/Zincwolf/sage.git
+cd sage
+git submodule update --init
+for patch_dir in patches/*; do
+    (cd "third_party/${patch_dir##*/}" && git am "../../$patch_dir"/*.patch) || exit 1
+done
+CUDA_HOME=/usr/local/cuda-12.8 uv sync --locked
+```
+
+Set `CUDA_HOME` to your CUDA 12.8 installation path. The initial sync downloads dependencies and builds CUDA extensions. Applying patches with `git am` requires a configured Git committer identity; see [Third-party components](THIRD_PARTY.md#initial-checkout) for details.
+
+## Quick start: quantize with SAGE
+
+Prepare a **local Hugging Face model** and a tokenized calibration artifact. The paper's [train data](https://huggingface.co/datasets/chizhongw/opd-data/blob/main/text/train_clean_balanced.parquet) and [validation data](https://huggingface.co/datasets/chizhongw/opd-data/blob/main/text/heldout_clean.parquet) can be downloaded together after installation:
+
+```bash
+uv run hf download chizhongw/opd-data \
+    text/train_clean_balanced.parquet text/heldout_clean.parquet \
+    --repo-type dataset --local-dir data
+```
+
+The files will be under `data/text/`. To construct the target-model self-rollout calibration artifact, see the [calibration configuration template](configs/data/opd.example.yaml) and `uv run wvq data --help`. Copy the [Qwen3 SAGE configuration](configs/sage/qwen3.example.yaml), set `model`, `calibration`, and `output_dir` to local paths, and run:
 
 ```bash
 cp configs/sage/qwen3.example.yaml configs/sage/qwen3.yaml
-# Edit configs/sage/qwen3.yaml before running.
+# Edit the three paths in configs/sage/qwen3.yaml.
 uv run wvq sage run --config configs/sage/qwen3.yaml
 ```
 
-This produces `exported_model/` under the configured `output_dir`.
-Local configuration files are Git-ignored.
+The command optimizes the model, exports it to `<output_dir>/exported_model/`, and validates the export. The default export contains standard Hugging Face **dense quantized-and-dequantized (QDQ) weights**. For a packed Qwen3 export using the CUDA inference path, set `export_compressed: true` **before running**; packed export is currently limited to the Qwen3 model family. Local configuration files are Git-ignored.
 
-We evaluate our models on [MMLU-Redux](https://evalscope.readthedocs.io/zh-cn/latest/benchmarks/mmlu_redux.html), [GSM8K](https://evalscope.readthedocs.io/zh-cn/latest/benchmarks/gsm8k.html), [MATH-500](https://evalscope.readthedocs.io/zh-cn/latest/benchmarks/math_500.html), [IFEval](https://evalscope.readthedocs.io/zh-cn/latest/benchmarks/ifeval.html), [HumanEval+](https://evalscope.readthedocs.io/zh-cn/latest/benchmarks/humaneval_plus.html) and [BFCL-v3](https://evalscope.readthedocs.io/zh-cn/latest/benchmarks/bfcl_v3.html) with [EvalScope](https://github.com/modelscope/evalscope) 1.10.0. Serving and inference details are provided in our preprint.
+For a calibration artifact built from general text datasets instead of target-model self-rollouts, see the [calibration template](configs/data/calibration.example.yaml) and `uv run wvq data calibration --help`.
 
-## Help
+## Reproducing the paper
 
-```bash
-uv run wvq --help
-uv run wvq sage --help
-uv run wvq sage run --help
-```
+- **Models:** Qwen3-4B-Instruct-2507, Qwen3-30B-A3B-Instruct-2507, Qwen3.5-4B-Thinking, Ministral-3-8B-Instruct-2512, and Ministral-3-14B-Instruct-2512. Corresponding SAGE templates are in [`configs/sage/`](configs/sage/).
+- **Calibration and optimization:** The paper uses 1,920 training and 128 validation sequences of 2,048 tokens, with target-model self-rollouts. The default SAGE configuration enables ESG and ABS, uses energy exponent 0.75, and optimizes for 20 epochs. See the [calibration template](configs/data/opd.example.yaml) and [SAGE templates](configs/sage/) for the full settings.
+- **Accuracy:** The six benchmarks are MMLU-Redux, GSM8K, MATH-500, IFEval, HumanEval+, and BFCL-v3. The paper evaluates the exported models with [EvalScope 1.10.0](https://github.com/modelscope/evalscope); this repository handles quantization and export rather than packaging the full accuracy-evaluation pipeline.
+- **Inference:** For packed Qwen3 models, use the [benchmark configuration](configs/benchmarks/model.example.yaml) and `uv run wvq benchmark model --config <your-config.yaml>`. Match the paper's model, hardware, sequence lengths, and benchmark settings before comparing numbers.
+
+Example configurations for QTIP, QuIP#, UniSVQ, and SPHQuant are also available in [`configs/`](configs/). Use `uv run wvq --help` for all commands.
 
 ## Development
 
 ```bash
 uv run pytest
 uv run ruff check .
-uv run ruff format .
+uv run ruff format --check .
 uv run basedpyright
 ```
 
-## License
+## Citation
 
-Project code is licensed under [GPL-3.0-only](LICENSE).
-Third-party licenses and the missing upstream UniSVQ license are recorded in
-[THIRD_PARTY.md](THIRD_PARTY.md).
+The paper link and citation will be added when the public version is available.
+
+## License and acknowledgements
+
+Project-owned code is licensed under [GPL-3.0-only](LICENSE). The repository builds on QTIP, QuIP#, UniSVQ, ParoQuant/SPHQuant, and Fast Hadamard Transform. Their pinned versions, licenses, and local patches are documented in [THIRD_PARTY.md](THIRD_PARTY.md). Model checkpoints and datasets retain their respective terms.
