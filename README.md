@@ -1,20 +1,29 @@
-# SAGE: Pushing 2-Bit Vector-Quantized LLMs Toward Real-World Usability
+<h1 align="center">SAGE: Pushing 2-Bit Vector-Quantized LLMs toward Real-World Usability</h1>
 
-[Xianglong Yan](https://xianglongyan.github.io/)<sup>*</sup>, Zenan Wu<sup>*</sup>, Kewei Zhang, Kaicheng Yang, and [Yulun Zhang](http://yulunzhang.com/)<sup>†</sup><br>
-Shanghai Jiao Tong University<br>
-<sup>*</sup>Equal contribution. <sup>†</sup>Corresponding author.
+<p align="center">
+  <a href="https://arxiv.org/abs/2610.14745"><img alt="arXiv paper" src="https://img.shields.io/badge/arXiv-2610.14745-b31b1b?logo=arxiv"></a>
+  <a href="https://arxiv.org/pdf/2610.14745"><img alt="Download paper PDF" src="https://img.shields.io/badge/Paper-PDF-d32f2f?logo=adobeacrobatreader"></a>
+  <a href="https://github.com/Zincwolf/sage"><img alt="GitHub code" src="https://img.shields.io/badge/Code-GitHub-181717?logo=github"></a>
+  <a href="https://huggingface.co/datasets/chizhongw/opd-data"><img alt="Train and validation data" src="https://img.shields.io/badge/Data-Hugging%20Face-FFD21E?logo=huggingface&amp;logoColor=black"></a>
+</p>
 
-**Paper:** arXiv link coming soon · **Code:** this repository
+<p align="center">
+  <a href="https://xianglongyan.github.io/">Xianglong Yan</a><sup>*</sup>, Zenan Wu<sup>*</sup>, Kewei Zhang, Kaicheng Yang, and <a href="http://yulunzhang.com/">Yulun Zhang</a><sup>†</sup><br>
+  Shanghai Jiao Tong University<br>
+  <sup>*</sup>Equal contribution. <sup>†</sup>Corresponding author.
+</p>
+
+<p align="center"><strong>2.25 BPW</strong> encoding payload &nbsp;·&nbsp; <strong>95.3%</strong> of BF16 average score on Qwen3-30B-A3B &nbsp;·&nbsp; up to <strong>2.55×</strong> end-to-end speedup on Qwen3-4B</p>
 
 SAGE is a weight-only vector quantization method designed to preserve the practical capabilities of large language models at an extremely low bit budget. This repository contains its quantization pipeline and CUDA inference kernels, alongside implementations of the comparison methods used in the paper.
 
-## Overview
+## ✨ Overview
 
-SAGE combines **Energy-Stratified Grouping (ESG)**, which groups channels from different activation-energy tiers and prioritizes sensitive channels during fitting, with **Adaptive Bit Split (ABS)**, which chooses the direction-codebook and radius bit allocation separately for each weight matrix. Its encoding payload is **2.25 bits per weight**, excluding shared metadata. On Qwen3-30B-A3B-Instruct-2507, SAGE retains **95.3%** of the BF16 model's average score; its CUDA kernel delivers up to **2.55×** non-streaming end-to-end speedup over FP16 on the measured Qwen3-4B workload.
+SAGE combines **Energy-Stratified Grouping (ESG)**, which groups channels from different activation-energy tiers and prioritizes sensitive channels during fitting, with **Adaptive Bit Split (ABS)**, which chooses the direction-codebook and radius bit allocation separately for each weight matrix. Its encoding payload is **2.25 bits per weight**, excluding shared metadata.
 
 ![SAGE method overview: spherical vector quantization, ESG, ABS, and block-wise optimization](figures/sage-overview.png)
 
-## Results
+## 📊 Results
 
 SAGE is evaluated on five models and six generative benchmarks covering knowledge, mathematics, code generation, instruction following, and tool use. The figure below summarizes accuracy and batch-one inference efficiency for **Qwen3-4B-Instruct-2507**. The plots on the left use independent zero-based axes; the speed measurements on the right use an RTX 4090 with on-demand weight reconstruction.
 
@@ -33,7 +42,7 @@ The following measurements use **Qwen3-4B-Instruct-2507**, batch-one non-streami
 
 ![First-token latency, output throughput, end-to-end speedup, and packed model size](figures/inference-efficiency.png)
 
-## Installation
+## ⚙️ Installation
 
 The quantization and CUDA build require **Linux**, an **NVIDIA GPU**, **CUDA 12.8**, **Python 3.11**, and [uv](https://docs.astral.sh/uv/). Clone the repository, initialize the pinned submodules, apply their patches, and install the locked environment:
 
@@ -49,7 +58,7 @@ CUDA_HOME=/usr/local/cuda-12.8 uv sync --locked
 
 Set `CUDA_HOME` to your CUDA 12.8 installation path. The initial sync downloads dependencies and builds CUDA extensions. Applying patches with `git am` requires a configured Git committer identity; see [Third-party components](THIRD_PARTY.md#initial-checkout) for details.
 
-## Quick start: quantize with SAGE
+## 🚀 Quick start: quantize with SAGE
 
 Prepare a **local Hugging Face model** and a tokenized calibration artifact. The paper's [train data](https://huggingface.co/datasets/chizhongw/opd-data/blob/main/text/train_clean_balanced.parquet) and [validation data](https://huggingface.co/datasets/chizhongw/opd-data/blob/main/text/heldout_clean.parquet) can be downloaded together after installation:
 
@@ -71,7 +80,7 @@ The command optimizes the model, exports it to `<output_dir>/exported_model/`, a
 
 For a calibration artifact built from general text datasets instead of target-model self-rollouts, see the [calibration template](configs/data/calibration.example.yaml) and `uv run wvq data calibration --help`.
 
-## Reproducing the paper
+## 🔬 Reproducing the paper
 
 - **Models:** Qwen3-4B-Instruct-2507, Qwen3-30B-A3B-Instruct-2507, Qwen3.5-4B-Thinking, Ministral-3-8B-Instruct-2512, and Ministral-3-14B-Instruct-2512. Corresponding SAGE templates are in [`configs/sage/`](configs/sage/).
 - **Calibration and optimization:** The paper uses 1,920 training and 128 validation sequences of 2,048 tokens, with target-model self-rollouts. The default SAGE configuration enables ESG and ABS, uses energy exponent 0.75, and optimizes for 20 epochs. See the [calibration template](configs/data/opd.example.yaml) and [SAGE templates](configs/sage/) for the full settings.
@@ -80,7 +89,7 @@ For a calibration artifact built from general text datasets instead of target-mo
 
 Example configurations for QTIP, QuIP#, UniSVQ, and SPHQuant are also available in [`configs/`](configs/). Use `uv run wvq --help` for all commands.
 
-## Development
+## 🛠️ Development
 
 ```bash
 uv run pytest
@@ -89,10 +98,22 @@ uv run ruff format --check .
 uv run basedpyright
 ```
 
-## Citation
+## 📖 Citation
 
-The paper link and citation will be added when the public version is available.
+If you find SAGE useful, please cite our paper:
 
-## License and acknowledgements
+```bibtex
+@misc{yan2026sage,
+  title={SAGE: Pushing 2-Bit Vector-Quantized LLMs toward Real-World Usability},
+  author={Yan, Xianglong and Wu, Zenan and Zhang, Kewei and Yang, Kaicheng and Zhang, Yulun},
+  year={2026},
+  eprint={2610.14745},
+  archivePrefix={arXiv},
+  primaryClass={cs.AI},
+  url={https://arxiv.org/abs/2610.14745}
+}
+```
+
+## ⚖️ License and acknowledgements
 
 Project-owned code is licensed under [GPL-3.0-only](LICENSE). The repository builds on QTIP, QuIP#, UniSVQ, ParoQuant/SPHQuant, and Fast Hadamard Transform. Their pinned versions, licenses, and local patches are documented in [THIRD_PARTY.md](THIRD_PARTY.md). Model checkpoints and datasets retain their respective terms.
